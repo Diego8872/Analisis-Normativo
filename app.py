@@ -106,7 +106,7 @@ Si no la encontramos, subí el PDF o pegá el texto — analizamos cualquier nor
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 st.markdown("# ⚖️ Analizador de Normativa Argentina")
-st.markdown("Consultá, analizá y cruzá resoluciones de BCRA, AFIP, Aduana, Minería y Boletín Oficial.")
+st.markdown("Consultá, analizá y cruzá cualquier normativa argentina — buscá por número, subí el documento o describí lo que necesitás.")
 st.markdown("---")
 
 # ════════════════════════════════════════════════════════
@@ -114,6 +114,48 @@ st.markdown("---")
 # ════════════════════════════════════════════════════════
 
 if not st.session_state["texto_norma"]:
+
+    # ── CHAT INICIAL ─────────────────────────────────────────────────────────
+    st.markdown("### 💬 Contame qué necesitás")
+
+    if "chat_inicial" not in st.session_state:
+        st.session_state["chat_inicial"] = [{
+            "role": "assistant",
+            "content": (
+                "Hola, soy tu asistente de normativa argentina. "
+                "Podés decirme el número de norma que querés analizar, "
+                "describir el tema, o contarme qué problema necesitás resolver — "
+                "y te ayudo a encontrar el camino. También podés usar los formularios de abajo directamente."
+            )
+        }]
+
+    for msg in st.session_state["chat_inicial"]:
+        css = "chat-user" if msg["role"] == "user" else "chat-ai"
+        icono = "👤" if msg["role"] == "user" else "🤖"
+        st.markdown(f'<div class="{css}">{icono} {msg["content"]}</div>', unsafe_allow_html=True)
+
+    if consulta := st.chat_input("Escribí tu consulta o el número de norma..."):
+        st.session_state["chat_inicial"].append({"role": "user", "content": consulta})
+
+        import anthropic as _anth
+        _client = _anth.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        with st.spinner("Pensando..."):
+            resp = _client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=400,
+                system="""Sos un asistente experto en normativa argentina (BCRA, AFIP, Aduana, Minería, Boletín Oficial y cualquier organismo).
+Tu rol es guiar al operador para encontrar y analizar la norma que necesita.
+Si menciona un número de norma, confirmalo y decile que lo busques o que lo suba.
+Si describe un problema o tema, orientalo hacia qué tipo de norma buscar.
+Sé breve, claro y directo. Máximo 3 oraciones.""",
+                messages=st.session_state["chat_inicial"]
+            )
+        respuesta = resp.content[0].text.strip()
+        st.session_state["chat_inicial"].append({"role": "assistant", "content": respuesta})
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### O usá los formularios directamente")
 
     col1, col2 = st.columns([3, 2])
 
