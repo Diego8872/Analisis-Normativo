@@ -67,13 +67,10 @@ init_state()
 with st.sidebar:
     st.markdown("## ⚖️ Normativa AR")
     st.markdown("---")
-    st.markdown("**Organismos soportados**")
     st.markdown("""
-- 🏦 BCRA — Comunicaciones A/B/C/P
-- 🧾 AFIP/ARCA — Resoluciones Generales
-- ⛏️ Minería — Res. SPM / SM
-- 📦 Aduana / SIC — Resoluciones arancelarias
-- 📰 Boletín Oficial — Toda norma publicada
+🔍 Buscamos en BCRA, AFIP, DGI, Boletín Oficial y Fuentes Oficiales.
+
+Si no la encontramos, subí el PDF o pegá el texto — analizamos cualquier normativa argentina.
     """)
     st.markdown("---")
 
