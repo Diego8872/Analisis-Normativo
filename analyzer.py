@@ -127,6 +127,7 @@ Al final, extraé metadatos entre <meta>...</meta>:
 
 
 def evaluar_confianza_anexo(texto_norma: str, ncms_condiciones: dict) -> dict:
+    ncms_condiciones = ncms_condiciones or {}
     tiene_ncms = bool(ncms_condiciones)
     cantidad = len(ncms_condiciones)
     menciona_anexo = any(p in texto_norma.upper() for p in ["ANEXO I", "ANEXO 1", "IF-20", "FORMA PARTE INTEGRANTE"])
