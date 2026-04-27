@@ -74,12 +74,61 @@ Ejemplos: "Com. A 8330"→BCRA, "RG 5424"→AFIP, "Res SIC 5/2026"→SIC, "Res 5
         return {"organismo": "BOLETIN", "tipo": "resolución", "numero_limpio": numero, "confianza": "baja", "razonamiento": "No determinado"}
 
 
+def _detectar_y_bajar_anexos(texto: str) -> list:
+    """Busca URLs de PDFs de Anexos en el texto y los descarga."""
+    import requests as _req
+    import pdfplumber
+    import io as _io
+    HEADERS = {"User-Agent": "Mozilla/5.0"}
+    anexos = []
+    urls = re.findall(r'https?://[^\s\'"<>\)]+\.pdf', texto, re.IGNORECASE)
+    nombres_raw = re.findall(r'ANEXO\s+([IVX\d]+)', texto, re.IGNORECASE)
+    for i, url in enumerate(urls[:3]):
+        nombre = f"ANEXO {nombres_raw[i]}" if i < len(nombres_raw) else f"ANEXO {i+1}"
+        try:
+            r = _req.get(url, headers=HEADERS, timeout=10)
+            if r.status_code == 200:
+                contenido = ""
+                with pdfplumber.open(_io.BytesIO(r.content)) as pdf:
+                    for page in pdf.pages:
+                        contenido += (page.extract_text() or "") + "\n"
+                if contenido.strip():
+                    anexos.append({"nombre": nombre, "url": url, "contenido": contenido.strip()})
+        except Exception:
+            pass
+    return anexos
+
+
+def _detectar_anexos_faltantes(texto: str, encontrados: list) -> list:
+    """Detecta Anexos mencionados en la norma que no pudieron obtenerse."""
+    menciones = re.findall(r'ANEXO\s+([IVX\d]+)', texto, re.IGNORECASE)
+    faltantes = []
+    for m in menciones:
+        nombre = f"ANEXO {m.upper()}"
+        if not any(nombre in a["nombre"].upper() for a in encontrados):
+            if nombre not in faltantes:
+                faltantes.append(nombre)
+    return faltantes
+
+
 def analizar_norma(texto_norma: str, organismo: str = "BOLETIN") -> dict:
+    # Intentar bajar Anexos referenciados en el texto
+    anexos_encontrados = _detectar_y_bajar_anexos(texto_norma)
+    anexos_faltantes = _detectar_anexos_faltantes(texto_norma, anexos_encontrados)
+
+    contexto_anexos = ""
+    if anexos_encontrados:
+        contexto_anexos = "\n\nANEXOS DISPONIBLES:\n" + "\n\n".join(
+            f"--- {a['nombre']} ---\n{a['contenido'][:1000]}"
+            for a in anexos_encontrados
+        )
+
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
     prompt = f"""Analizá esta normativa argentina con el formato de 7 secciones.
+{contexto_anexos}
 
 NORMATIVA:
-{texto_norma[:7000]}
+{texto_norma[:5000]}
 
 Al final, extraé metadatos entre <meta>...</meta>:
 <meta>
@@ -90,13 +139,13 @@ Al final, extraé metadatos entre <meta>...</meta>:
   "vigencia": "desde cuándo rige",
   "impacto_principal": "cambiario|arancelario|impositivo|financiero|minero|comercial|sanitario|otro",
   "afectados": ["lista"],
-  "tiene_anexo_ncm": true,
-  "ncms_condiciones": {{"NCM": "condición o null"}}
+  "tiene_anexo_ncm": false,
+  "ncms_condiciones": {{}}
 }}
 </meta>"""
 
     response = client.messages.create(
-        model=MODEL, max_tokens=1500,
+        model=MODEL, max_tokens=2500,
         system=system,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -120,9 +169,11 @@ Al final, extraé metadatos entre <meta>...</meta>:
         "impacto_principal": meta.get("impacto_principal", ""),
         "afectados": meta.get("afectados", []),
         "tiene_anexo_ncm": meta.get("tiene_anexo_ncm", False),
-        "ncms_condiciones": meta.get("ncms_condiciones", {}),
+        "ncms_condiciones": meta.get("ncms_condiciones") or {},
         "puntos_clave": [],
         "obligaciones": [],
+        "anexos_encontrados": anexos_encontrados,
+        "anexos_faltantes": anexos_faltantes,
     }
 
 
