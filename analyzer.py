@@ -50,14 +50,13 @@ LIMITE_TOTAL   = 28_000  # chars — techo de seguridad Tier 1 (~7k tokens input
 
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita."""
 
-FORMATO_SALIDA = """Formato OBLIGATORIO de 7 secciones. Completá TODAS sin excepción:
+FORMATO_SALIDA = """Formato OBLIGATORIO de 6 secciones. Completá TODAS sin excepción:
 1. RESUMEN EJECUTIVO - qué regula, a quién afecta, qué cambia
 2. PUNTOS CLAVE - obligaciones, plazos, excepciones
 3. ANÁLISIS OPERATIVO - impacto práctico, acciones concretas
 4. RIESGOS Y ZONAS GRISES - ambigüedades, conflictos, incumplimientos
-5. EJEMPLO PRÁCTICO - caso concreto real
-6. CHECKLIST ACCIONABLE - pasos para cumplir
-7. DUDAS ABIERTAS - qué confirmar con autoridad competente"""
+5. CHECKLIST ACCIONABLE - pasos concretos para cumplir
+6. DUDAS ABIERTAS - qué confirmar con autoridad competente"""
 
 
 def detectar_organismo_con_ia(numero: str) -> dict:
@@ -249,10 +248,9 @@ NORMATIVA:
         texto_parte1 = texto_parte1[:meta_match.start()].strip()
 
     # ── LLAMADA 2: secciones 5-7 ─────────────────────────────────────────────
-    prompt2 = f"""Continuás el análisis de esta normativa argentina. Generá SOLO las secciones 5 a 7:
-5. EJEMPLO PRÁCTICO - caso concreto real con números y pasos
-6. CHECKLIST ACCIONABLE - pasos concretos para cumplir
-7. DUDAS ABIERTAS - qué confirmar con autoridad competente
+    prompt2 = f"""Continuás el análisis de esta normativa argentina. Generá SOLO las secciones 5 y 6:
+5. CHECKLIST ACCIONABLE - pasos concretos para cumplir
+6. DUDAS ABIERTAS - qué confirmar con autoridad competente
 {aviso_cobertura}
 Contexto del análisis previo (secciones 1-4 ya generadas):
 {texto_parte1[:2000]}
