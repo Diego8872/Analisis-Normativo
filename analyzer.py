@@ -96,7 +96,7 @@ Al final, extraé metadatos entre <meta>...</meta>:
 </meta>"""
 
     response = client.messages.create(
-        model=MODEL, max_tokens=3000,
+        model=MODEL, max_tokens=1500,
         system=system,
         messages=[{"role": "user", "content": prompt}]
     )
