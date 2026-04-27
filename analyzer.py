@@ -241,7 +241,7 @@ Al final incluí metadatos entre <meta>...</meta>:
 NORMATIVA:
 {texto_norma_truncado}"""
 
-    texto_parte1 = _llamar_modelo(system, prompt1, max_tokens=5000)
+    texto_parte1 = _llamar_modelo(system, prompt1, max_tokens=2000)
 
     # Extraer metadatos de parte 1
     meta = {}
@@ -264,7 +264,7 @@ Contexto del análisis previo (secciones 1-4 ya generadas):
 NORMATIVA:
 {texto_norma_truncado[:3000]}"""
 
-    texto_parte2 = _llamar_modelo(system, prompt2, max_tokens=4000)
+    texto_parte2 = _llamar_modelo(system, prompt2, max_tokens=1500)
 
     # Limpiar cualquier <meta> residual de parte 2
     meta_match2 = re.search(r"<meta>(.*?)</meta>", texto_parte2, re.DOTALL)
