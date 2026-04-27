@@ -1,21 +1,46 @@
 """
-analyzer.py — Motor Claude para análisis de normativa argentina
-Prompt experto senior + formato estructurado de 7 secciones
+analyzer.py — Motor de análisis de normativa argentina
+Groq (llama-3.3-70b) como motor principal — rápido y gratuito
+Claude Haiku como fallback si Groq falla
 
-CAMBIOS v2:
-- Límite norma: 5,000 → 9,500 chars (norma completa entra)
-- Límite por anexo: 600 → 7,000 chars (anexos completos entran)
-- Límite total input: techo 28,000 chars (~7,000 tokens) — seguro en Haiku Tier 1
-- Costo por análisis completo: ~$0.006
-- Lógica de anexos: acepta lista de textos ya extraídos (subidos por el usuario)
+CAMBIOS v3:
+- Motor principal: Groq llama-3.3-70b (~2-5s, gratis)
+- Fallback: Claude Haiku (se usa solo si Groq falla)
+- Web search: siempre Claude Sonnet (Groq no tiene)
+- Límites y lógica de anexos: sin cambios
 """
 import os
 import json
 import re
 import anthropic
+from groq import Groq
 
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-MODEL = "claude-haiku-4-5-20251001"
+client_claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+client_groq   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+
+MODEL_GROQ   = "llama-3.3-70b-versatile"
+MODEL_CLAUDE = "claude-haiku-4-5-20251001"  # fallback
+
+
+def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
+    """Groq primero, Claude Haiku como fallback."""
+    try:
+        response = client_groq.chat.completions.create(
+            model=MODEL_GROQ,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": prompt},
+            ]
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        response = client_claude.messages.create(
+            model=MODEL_CLAUDE, max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip()
 
 # ── Límites calibrados al contenido real ──────────────────────────────────────
 LIMITE_NORMA   = 9_500   # chars — cubre normas de hasta ~4 páginas completas
@@ -50,11 +75,11 @@ Determiná organismo y tipo. Respondé SOLO JSON:
 Ejemplos: "Com. A 8330"→BCRA, "RG 5424"→AFIP, "Res SIC 5/2026"→SIC, "Res 5838/2026"→BOLETIN, "SPM 89/19"→MINERIA, "Disp ANMAT 537"→ANMAT"""
 
     try:
-        response = client.messages.create(
-            model=MODEL, max_tokens=300,
-            messages=[{"role": "user", "content": prompt}]
+        text = _llamar_modelo(
+            "Respondé SOLO con JSON válido, sin texto adicional.",
+            prompt, max_tokens=300
         )
-        text = re.sub(r"```json|```", "", response.content[0].text).strip()
+        text = re.sub(r"```json|```", "", text).strip()
         return json.loads(text)
     except Exception:
         return {
@@ -206,13 +231,7 @@ Al final, extraé metadatos entre <meta>...</meta>:
 }}
 </meta>"""
 
-    response = client.messages.create(
-        model=MODEL, max_tokens=4000,
-        system=system,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    texto_respuesta = response.content[0].text.strip()
+    texto_respuesta = _llamar_modelo(system, prompt, max_tokens=4000)
     meta = {}
     meta_match = re.search(r"<meta>(.*?)</meta>", texto_respuesta, re.DOTALL)
     if meta_match:
@@ -277,12 +296,20 @@ Tu rol ahora: guiar al operador para encontrar y analizar la norma.
 - Si es ambiguo, preguntá organismo o más contexto.
 - Máximo 4 oraciones. Directo y profesional."""
 
-    response = client.messages.create(
-        model=MODEL, max_tokens=400,
-        system=system,
-        messages=historial
-    )
-    return response.content[0].text.strip()
+    # Convertir historial al formato Groq/OpenAI
+    msgs = [{"role": m["role"], "content": m["content"]} for m in historial]
+    try:
+        response = client_groq.chat.completions.create(
+            model=MODEL_GROQ, max_tokens=400,
+            messages=[{"role": "system", "content": system}] + msgs
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        response = client_claude.messages.create(
+            model=MODEL_CLAUDE, max_tokens=400,
+            system=system, messages=historial
+        )
+        return response.content[0].text.strip()
 
 
 def responder_en_dialogo(texto_norma: str, analisis: dict, historial: list, organismo: str = "BOLETIN") -> str:
@@ -297,12 +324,19 @@ Texto norma:
 
 Respondé con criterio experto. Si algo no está en la norma, indicalo claramente."""
 
-    response = client.messages.create(
-        model=MODEL, max_tokens=1000,
-        system=system,
-        messages=historial
-    )
-    return response.content[0].text.strip()
+    msgs = [{"role": m["role"], "content": m["content"]} for m in historial]
+    try:
+        response = client_groq.chat.completions.create(
+            model=MODEL_GROQ, max_tokens=1000,
+            messages=[{"role": "system", "content": system}] + msgs
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        response = client_claude.messages.create(
+            model=MODEL_CLAUDE, max_tokens=1000,
+            system=system, messages=historial
+        )
+        return response.content[0].text.strip()
 
 
 def generar_pregunta_output(analisis: dict, historial: list) -> str:
@@ -318,9 +352,9 @@ Muestra: {json.dumps(muestra[:4], ensure_ascii=False)}
 Identificá artículo/código, NCM y descripción.
 SOLO JSON: {{"col_articulo": "nombre_o_null", "col_ncm": "nombre_o_null", "col_descripcion": "nombre_o_null"}}"""
 
-    response = client.messages.create(model=MODEL, max_tokens=150, messages=[{"role": "user", "content": prompt}])
     try:
-        return json.loads(re.sub(r"```json|```", "", response.content[0].text).strip())
+        text = _llamar_modelo("Respondé SOLO con JSON válido.", prompt, max_tokens=150)
+        return json.loads(re.sub(r"```json|```", "", text).strip())
     except Exception:
         return {"col_articulo": None, "col_ncm": None, "col_descripcion": None}
 
@@ -351,8 +385,8 @@ Artículo: {articulo} | NCM: {ncm_art} | Desc: {desc} | Condición: {condicion o
 ¿Encuadra? SOLO JSON: {{"estado": "ENCUADRA|NO ENCUADRA|A ANALIZAR", "fundamento": "1 oración"}}"""
 
         try:
-            response = client.messages.create(model=MODEL, max_tokens=150, messages=[{"role": "user", "content": prompt}])
-            resultado = json.loads(re.sub(r"```json|```", "", response.content[0].text).strip())
+            text = _llamar_modelo("Respondé SOLO con JSON válido.", prompt, max_tokens=150)
+            resultado = json.loads(re.sub(r"```json|```", "", text).strip())
             estado = resultado.get("estado", "A ANALIZAR")
             fundamento = resultado.get("fundamento", "")
         except Exception:
@@ -376,5 +410,4 @@ def generar_resumen_ejecutivo(analisis: dict, resultados: list = None, organismo
         stats = f"\nCruce: {len(resultados)} artículos | Encuadran: {enc} | No: {no} | A analizar: {aal}\n{detalle}"
 
     prompt = f"""{SISTEMA_EXPERTO}\nRedactá memo ejecutivo profesional:\nNORMA: {analisis.get('titulo','')}\n{analisis.get('analisis_completo','')[:3000]}\n{stats}\nIncluir: encabezado, marco normativo, análisis técnico, conclusiones y recomendaciones."""
-    response = client.messages.create(model=MODEL, max_tokens=1500, messages=[{"role": "user", "content": prompt}])
-    return response.content[0].text.strip()
+    return _llamar_modelo(SISTEMA_EXPERTO, prompt, max_tokens=1500)
