@@ -1,9 +1,8 @@
 """
-utils.py — Búsqueda de normas con web search via Claude API + lectura de archivos
+utils.py — Búsqueda de normas con web search + fetch + lectura de archivos
 """
 import re
 import io
-import json
 import os
 import requests
 import anthropic
@@ -11,81 +10,109 @@ import anthropic
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AnálisisNormativo/1.0)"}
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
+URLS_PRIORITARIAS = [
+    "https://www.boletinoficial.gob.ar",
+    "https://servicios.infoleg.gob.ar",
+    "https://biblioteca.arca.gob.ar",
+    "https://www.bcra.gob.ar",
+    "https://www.argentina.gob.ar/normativa",
+]
 
-# ── BÚSQUEDA CON WEB SEARCH ───────────────────────────────────────────────────
 
 def buscar_norma(numero: str) -> tuple[str, str]:
     """
-    Usa Claude con web_search para encontrar la norma en fuentes oficiales.
-    Busca en Boletín Oficial, Infoleg, ARCA, BCRA, AFIP, etc.
+    Busca la norma usando web search + fetch del contenido completo.
     Returns: (texto_norma, fuente)
     """
-    prompt = f"""Buscá la siguiente norma argentina: "{numero}"
+    # Paso 1: buscar con web search para encontrar la URL correcta
+    prompt_busqueda = f"""Buscá la norma argentina: "{numero}"
 
-Buscá en estas fuentes en orden de prioridad:
-1. boletinoficial.gob.ar
-2. infoleg.gob.ar / argentina.gob.ar/normativa
-3. biblioteca.arca.gob.ar (para resoluciones ARCA/AFIP)
-4. bcra.gob.ar (para comunicaciones BCRA)
-5. servicios.infoleg.gob.ar
-
-Una vez que la encuentres, extraé el texto COMPLETO de la norma incluyendo:
-- Considerandos
-- Articulado completo
-- Anexos si están disponibles
-- Fecha de publicación y vigencia
-
-Retorná el texto completo de la norma. Si encontrás los Anexos también incluilos.
-Al final indicá la URL donde la encontraste entre etiquetas <fuente>URL</fuente>."""
+Encontrá la URL oficial donde está publicada (Boletín Oficial, Infoleg, ARCA, BCRA, etc).
+Retorná SOLO la URL más relevante donde está el texto completo, sin ningún otro texto.
+Ejemplo de respuesta: https://www.boletinoficial.gob.ar/detalleAviso/primera/305286/20260422"""
 
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=4000,
+            max_tokens=200,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt_busqueda}]
+        )
+
+        # Extraer URL de la respuesta
+        url_encontrada = None
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                # Buscar URLs en el texto
+                urls = re.findall(r'https?://[^\s\'"<>]+', block.text)
+                for url in urls:
+                    if any(dominio in url for dominio in [
+                        "boletinoficial", "infoleg", "arca.gob", "bcra.gob",
+                        "argentina.gob", "afip.gob", "biblioteca"
+                    ]):
+                        url_encontrada = url
+                        break
+
+        # Paso 2: si encontramos URL, fetchear el contenido completo
+        if url_encontrada:
+            texto = _fetch_url(url_encontrada)
+            if texto and len(texto) > 300:
+                return texto, url_encontrada
+
+        # Paso 3: si no hay URL o el fetch falló, pedir a Claude que traiga el texto
+        prompt_texto = f"""Buscá la norma argentina: "{numero}" y traé el texto COMPLETO.
+
+Incluí:
+- Considerandos completos
+- Todos los artículos
+- Anexos si están disponibles
+- Fecha de publicación
+
+Es FUNDAMENTAL que incluyas el texto real de la norma, no un resumen."""
+
+        response2 = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=3000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": prompt_texto}]
         )
 
         texto_completo = ""
-        fuente_url = ""
-
-        for block in response.content:
-            if hasattr(block, "text"):
+        for block in response2.content:
+            if hasattr(block, "text") and block.text:
                 texto_completo += block.text
 
-        # Extraer URL de fuente
-        fuente_match = re.search(r"<fuente>(.*?)</fuente>", texto_completo, re.DOTALL)
-        if fuente_match:
-            fuente_url = fuente_match.group(1).strip()
-            texto_completo = texto_completo[:fuente_match.start()].strip()
-
         if len(texto_completo) > 300:
-            return texto_completo, fuente_url or "Fuentes oficiales (web search)"
-        else:
-            return "", ""
+            return texto_completo, "Fuentes oficiales (web search)"
 
     except Exception as e:
-        # Fallback a scraping directo si falla web search
-        return _buscar_scraping(numero)
+        pass
+
+    return "", ""
 
 
-def _buscar_scraping(numero: str) -> tuple[str, str]:
-    """Fallback: scraping directo del Boletín Oficial."""
+def _fetch_url(url: str) -> str:
+    """Descarga y extrae el texto de una URL."""
     try:
-        url = "https://www.boletinoficial.gob.ar/busquedaAvanzada/realizarBusqueda"
-        r = requests.get(url, params={"textoBusqueda": numero.strip(), "limit": 3},
-                         headers=HEADERS, timeout=12)
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        content_type = r.headers.get("content-type", "")
+
+        if "pdf" in content_type or url.lower().endswith(".pdf"):
+            return leer_pdf(r.content)
+
+        # HTML — extraer texto
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            if ".pdf" in a["href"].lower():
-                texto = leer_pdf_desde_url(a["href"])
-                if texto:
-                    return texto, "Boletín Oficial — boletinoficial.gob.ar"
-        texto = soup.get_text(separator="\n", strip=True)[:6000]
-        return texto, "Boletín Oficial — boletinoficial.gob.ar"
+        # Remover scripts y estilos
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        texto = soup.get_text(separator="\n", strip=True)
+        # Limpiar líneas vacías múltiples
+        texto = re.sub(r'\n{3,}', '\n\n', texto)
+        return texto[:8000]
     except Exception:
-        return "", ""
+        return ""
 
 
 # ── LECTURA DE ARCHIVOS ───────────────────────────────────────────────────────
