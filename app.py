@@ -153,24 +153,27 @@ if not st.session_state["texto_norma"]:
         st.markdown("#### 📎 Subir archivo")
         archivo = st.file_uploader("PDF, Word o .txt", type=["pdf", "docx", "doc", "txt"])
         if archivo:
-            with st.spinner("Leyendo archivo..."):
-                texto = leer_archivo(archivo.read(), archivo.name)
-                detector = detectar_organismo_con_ia(archivo.name)
-                organismo = detector.get("organismo", "BOLETIN")
-            if texto and len(texto) > 100:
-                st.session_state.update({
-                    "texto_norma": texto, "organismo": organismo,
-                    "fuente": f"Archivo: {archivo.name}", "norma_nombre": archivo.name,
-                })
-                st.success(f"✅ {len(texto):,} caracteres leídos")
-                st.rerun()
+            st.info(f"📄 Archivo cargado: **{archivo.name}**")
+            if st.button("⚖️ Analizar archivo", use_container_width=True, type="primary"):
+                with st.spinner("Leyendo archivo..."):
+                    texto = leer_archivo(archivo.read(), archivo.name)
+                    detector = detectar_organismo_con_ia(archivo.name)
+                    organismo = detector.get("organismo", "BOLETIN")
+                if texto and len(texto) > 100:
+                    st.session_state.update({
+                        "texto_norma": texto, "organismo": organismo,
+                        "fuente": f"Archivo: {archivo.name}", "norma_nombre": archivo.name,
+                    })
+                    st.rerun()
 
     st.markdown("#### ✍️ O pegá el texto")
     texto_pegado = st.text_area("Texto de la norma", height=180,
                                  placeholder="Pegá el texto completo de la resolución...")
-    if st.button("📋 Usar este texto", disabled=not texto_pegado):
-        detector = detectar_organismo_con_ia(texto_pegado[:200])
-        organismo = detector.get("organismo", "BOLETIN")
+    if st.button("⚖️ Analizar texto", use_container_width=True,
+                 type="primary", disabled=not texto_pegado):
+        with st.spinner("Identificando norma..."):
+            detector = detectar_organismo_con_ia(texto_pegado[:200])
+            organismo = detector.get("organismo", "BOLETIN")
         st.session_state.update({
             "texto_norma": texto_pegado, "organismo": organismo,
             "fuente": "Texto ingresado manualmente", "norma_nombre": "Norma ingresada",
