@@ -33,7 +33,7 @@ Ejemplo de respuesta: https://www.boletinoficial.gob.ar/detalleAviso/primera/305
 
     try:
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=200,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt_busqueda}]
@@ -71,7 +71,7 @@ Incluí:
 Es FUNDAMENTAL que incluyas el texto real de la norma, no un resumen."""
 
         response2 = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=3000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt_texto}]
