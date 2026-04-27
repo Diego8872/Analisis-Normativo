@@ -317,13 +317,16 @@ else:
                 textos_anexos = []
                 for f in anexos_subidos:
                     contenido = leer_archivo(f.read(), f.name)
-                    textos_anexos.append(f"--- {f.name} ---\n{contenido[:2000]}")
-                texto_extra = "\n\n".join(textos_anexos)
-                nuevo_analisis = st.session_state["analisis"].copy()
-                nuevo_analisis["analisis_completo"] += f"\n\n**ANEXOS INCORPORADOS:**\n{texto_extra}"
-                nuevo_analisis["anexos_faltantes"] = []
-                st.session_state["analisis"] = nuevo_analisis
-                st.success("✅ Anexos incorporados al análisis.")
+                    textos_anexos.append(f"--- {f.name} ---\n{contenido[:3000]}")
+                texto_anexos = "\n\n".join(textos_anexos)
+                # Regenerar análisis con texto completo + Anexos
+                texto_completo = st.session_state["texto_norma"] + "\n\nANEXOS:\n" + texto_anexos
+                with st.spinner("Regenerando análisis con Anexos..."):
+                    nuevo_analisis = analizar_norma(texto_completo, organismo)
+                    nuevo_analisis["anexos_faltantes"] = []
+                    st.session_state["analisis"] = nuevo_analisis
+                    st.session_state["texto_norma"] = texto_completo
+                st.success("✅ Análisis regenerado con los Anexos.")
                 st.rerun()
 
         st.markdown(analisis.get("analisis_completo", ""), unsafe_allow_html=False)
@@ -339,7 +342,7 @@ else:
     # ── TAB 4: EXPORTAR ───────────────────────────────────────────────────────
     with tab4:
         st.markdown("#### 📥 Exportar análisis")
-        from exports import generar_word, generar_pdf, generar_ppt
+        from exports import generar_word, generar_pdf
 
         nombre_base = f"analisis_{datetime.now().strftime('%Y%m%d_%H%M')}"
         resultados = st.session_state.get("resultados_cruce")
@@ -367,30 +370,20 @@ else:
                     use_container_width=True)
 
         with c3:
-            st.markdown("**📊 PowerPoint (.pptx)**")
-            if st.button("Generar PPT", use_container_width=True):
-                with st.spinner("Generando..."):
-                    ppt_bytes = generar_ppt(analisis, resultados)
-                st.download_button("⬇️ Descargar PPT", data=ppt_bytes,
-                    file_name=f"{nombre_base}.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            st.markdown("**📊 Excel**")
+            if resultados:
+                df_exp = pd.DataFrame(resultados)
+                buf = io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    df_exp.to_excel(writer, index=False, sheet_name="Análisis completo")
+                    df_enc = df_exp[df_exp["estado"] == "ENCUADRA"]
+                    df_no  = df_exp[df_exp["estado"] != "ENCUADRA"]
+                    if not df_enc.empty: df_enc.to_excel(writer, index=False, sheet_name="Encuadran")
+                    if not df_no.empty:  df_no.to_excel(writer, index=False, sheet_name="No encuadran")
+                buf.seek(0)
+                st.download_button("⬇️ Descargar Excel", data=buf,
+                    file_name=f"{nombre_base}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True)
-
-        st.markdown("---")
-        st.markdown("**📊 Excel con semáforo** (solo si hiciste cruce con catálogo)")
-        if resultados:
-            df_exp = pd.DataFrame(resultados)
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df_exp.to_excel(writer, index=False, sheet_name="Análisis completo")
-                df_enc = df_exp[df_exp["estado"] == "ENCUADRA"]
-                df_no  = df_exp[df_exp["estado"] != "ENCUADRA"]
-                if not df_enc.empty: df_enc.to_excel(writer, index=False, sheet_name="Encuadran")
-                if not df_no.empty:  df_no.to_excel(writer, index=False, sheet_name="No encuadran")
-            buf.seek(0)
-            st.download_button("⬇️ Descargar Excel", data=buf,
-                file_name=f"{nombre_base}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
-        else:
-            st.info("Hacé el cruce con catálogo primero para exportar el Excel.")
+            else:
+                st.info("Hacé el cruce primero.")
