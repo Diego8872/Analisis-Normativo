@@ -1,93 +1,96 @@
 """
-utils.py — Lectura de archivos y búsqueda de normas en fuentes oficiales
+utils.py — Búsqueda de normas con web search via Claude API + lectura de archivos
 """
 import re
 import io
+import json
+import os
 import requests
-from bs4 import BeautifulSoup
+import anthropic
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AnálisisNormativo/1.0)"}
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 
-# ── DETECCIÓN DE ORGANISMO ────────────────────────────────────────────────────
-
-def detectar_organismo(numero: str) -> str:
-    """Detecta el organismo según el formato del número de norma."""
-    n = numero.upper().strip()
-    if re.match(r"COM\.?\s*[ABCP]\s*\d+|COMUNICACI[OÓ]N\s*[ABCP]", n):
-        return "BCRA"
-    if re.match(r"RG\s*\d+|RESOLUCI[OÓ]N\s*GENERAL", n):
-        return "AFIP"
-    if re.match(r"RES\.?\s*SIC|SIC\s*\d+", n):
-        return "SIC"
-    if re.match(r"RES\.?\s*SPM|SPM\s*\d+|RES\.?\s*SM\s*\d+", n):
-        return "MINERIA"
-    return "BOLETIN"
-
-
-# ── BÚSQUEDA POR ORGANISMO ────────────────────────────────────────────────────
-
-def buscar_bcra(numero: str) -> str:
-    """Busca una comunicación del BCRA por número."""
-    m = re.search(r"([ABCP])\s*(\d+)", numero.upper())
-    if not m:
-        return ""
-    tipo, num = m.group(1), m.group(2)
-    url = (
-        f"https://www.bcra.gob.ar/SistemasFinancierosYdePagos/"
-        f"Buscador_por_tipo.asp?tipo={tipo}&numero={num}"
-    )
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            if ".pdf" in a["href"].lower():
-                pdf_url = a["href"] if a["href"].startswith("http") \
-                    else "https://www.bcra.gob.ar" + a["href"]
-                return leer_pdf_desde_url(pdf_url)
-        return soup.get_text(separator="\n", strip=True)[:8000]
-    except Exception:
-        return ""
-
-
-def buscar_boletin_oficial(numero: str) -> str:
-    """Busca en el Boletín Oficial argentino."""
-    query = numero.strip()
-    try:
-        url = "https://www.boletinoficial.gob.ar/busquedaAvanzada/realizarBusqueda"
-        r = requests.get(url, params={"textoBusqueda": query, "limit": 3},
-                         headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(r.text, "html.parser")
-        # Intentar encontrar link a PDF o texto
-        for a in soup.find_all("a", href=True):
-            if ".pdf" in a["href"].lower():
-                return leer_pdf_desde_url(a["href"])
-        return soup.get_text(separator="\n", strip=True)[:6000]
-    except Exception:
-        return ""
-
+# ── BÚSQUEDA CON WEB SEARCH ───────────────────────────────────────────────────
 
 def buscar_norma(numero: str) -> tuple[str, str]:
     """
-    Intenta encontrar la norma en fuentes oficiales.
-    Returns: (texto_norma, fuente_descripcion)
+    Usa Claude con web_search para encontrar la norma en fuentes oficiales.
+    Busca en Boletín Oficial, Infoleg, ARCA, BCRA, AFIP, etc.
+    Returns: (texto_norma, fuente)
     """
-    organismo = detectar_organismo(numero)
+    prompt = f"""Buscá la siguiente norma argentina: "{numero}"
 
-    if organismo == "BCRA":
-        texto = buscar_bcra(numero)
-        fuente = "BCRA — bcra.gob.ar"
-    else:
-        texto = buscar_boletin_oficial(numero)
-        fuente = "Boletín Oficial — boletinoficial.gob.ar"
+Buscá en estas fuentes en orden de prioridad:
+1. boletinoficial.gob.ar
+2. infoleg.gob.ar / argentina.gob.ar/normativa
+3. biblioteca.arca.gob.ar (para resoluciones ARCA/AFIP)
+4. bcra.gob.ar (para comunicaciones BCRA)
+5. servicios.infoleg.gob.ar
 
-    return texto.strip(), fuente
+Una vez que la encuentres, extraé el texto COMPLETO de la norma incluyendo:
+- Considerandos
+- Articulado completo
+- Anexos si están disponibles
+- Fecha de publicación y vigencia
+
+Retorná el texto completo de la norma. Si encontrás los Anexos también incluilos.
+Al final indicá la URL donde la encontraste entre etiquetas <fuente>URL</fuente>."""
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        texto_completo = ""
+        fuente_url = ""
+
+        for block in response.content:
+            if hasattr(block, "text"):
+                texto_completo += block.text
+
+        # Extraer URL de fuente
+        fuente_match = re.search(r"<fuente>(.*?)</fuente>", texto_completo, re.DOTALL)
+        if fuente_match:
+            fuente_url = fuente_match.group(1).strip()
+            texto_completo = texto_completo[:fuente_match.start()].strip()
+
+        if len(texto_completo) > 300:
+            return texto_completo, fuente_url or "Fuentes oficiales (web search)"
+        else:
+            return "", ""
+
+    except Exception as e:
+        # Fallback a scraping directo si falla web search
+        return _buscar_scraping(numero)
+
+
+def _buscar_scraping(numero: str) -> tuple[str, str]:
+    """Fallback: scraping directo del Boletín Oficial."""
+    try:
+        url = "https://www.boletinoficial.gob.ar/busquedaAvanzada/realizarBusqueda"
+        r = requests.get(url, params={"textoBusqueda": numero.strip(), "limit": 3},
+                         headers=HEADERS, timeout=12)
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            if ".pdf" in a["href"].lower():
+                texto = leer_pdf_desde_url(a["href"])
+                if texto:
+                    return texto, "Boletín Oficial — boletinoficial.gob.ar"
+        texto = soup.get_text(separator="\n", strip=True)[:6000]
+        return texto, "Boletín Oficial — boletinoficial.gob.ar"
+    except Exception:
+        return "", ""
 
 
 # ── LECTURA DE ARCHIVOS ───────────────────────────────────────────────────────
 
 def leer_pdf(file_bytes: bytes) -> str:
-    """Extrae texto de un PDF."""
     try:
         import pdfplumber
         texto = ""
@@ -100,7 +103,6 @@ def leer_pdf(file_bytes: bytes) -> str:
 
 
 def leer_pdf_desde_url(url: str) -> str:
-    """Descarga y extrae texto de un PDF desde URL."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
@@ -110,7 +112,6 @@ def leer_pdf_desde_url(url: str) -> str:
 
 
 def leer_word(file_bytes: bytes) -> str:
-    """Extrae texto de un archivo Word (.docx)."""
     try:
         import docx
         doc = docx.Document(io.BytesIO(file_bytes))
@@ -120,7 +121,6 @@ def leer_word(file_bytes: bytes) -> str:
 
 
 def leer_archivo(file_bytes: bytes, filename: str) -> str:
-    """Detecta el tipo y extrae el texto."""
     ext = filename.lower().split(".")[-1]
     if ext == "pdf":
         return leer_pdf(file_bytes)
@@ -131,7 +131,6 @@ def leer_archivo(file_bytes: bytes, filename: str) -> str:
 
 
 def leer_excel(file_bytes: bytes, filename: str):
-    """Lee un Excel o CSV y retorna un DataFrame."""
     import pandas as pd
     ext = filename.lower().split(".")[-1]
     try:
@@ -143,6 +142,6 @@ def leer_excel(file_bytes: bytes, filename: str):
                 df = xl.parse(sheet, dtype=str).fillna("")
                 if len(df) > 0 and len(df.columns) > 1:
                     return df
-    except Exception as e:
+    except Exception:
         return None
     return None
