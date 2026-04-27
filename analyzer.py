@@ -92,16 +92,16 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN") -> dict:
     contexto_anexos = ""
     if anexos_encontrados:
         contexto_anexos = "\n\nANEXOS DISPONIBLES:\n" + "\n\n".join(
-            f"--- {a['nombre']} ---\n{a['contenido'][:1000]}"
+            f"--- {a['nombre']} ---\n{a['contenido'][:600]}"
             for a in anexos_encontrados
         )
 
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
-    prompt = f"""Analizá esta normativa argentina con el formato de 7 secciones.
+    prompt = f"""Analizá esta normativa argentina con el formato de 7 secciones. NO cortes el análisis, completá todas las secciones.
 {contexto_anexos}
 
 NORMATIVA:
-{texto_norma[:6000]}
+{texto_norma[:5000]}
 
 Al final, extraé metadatos entre <meta>...</meta>:
 <meta>
@@ -118,7 +118,7 @@ Al final, extraé metadatos entre <meta>...</meta>:
 </meta>"""
 
     response = client.messages.create(
-        model=MODEL, max_tokens=2500,
+        model=MODEL, max_tokens=4000,
         system=system,
         messages=[{"role": "user", "content": prompt}]
     )
