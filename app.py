@@ -45,6 +45,7 @@ def init_state():
         "cols_catalogo": None, "resultados_cruce": None,
         "confianza_anexo": None, "norma_nombre": "",
         "chat_inicial": None, "detector_info": None,
+        "_anexos_iniciales": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -149,18 +150,35 @@ if not st.session_state["texto_norma"]:
 
     with col2:
         st.markdown("#### 📎 Subir archivo")
-        archivo = st.file_uploader("PDF, Word o .txt", type=["pdf", "docx", "doc", "txt"])
-        if archivo:
-            st.info(f"📄 Archivo cargado: **{archivo.name}**")
-            if st.button("⚖️ Analizar archivo", use_container_width=True, type="primary"):
-                with st.spinner("Leyendo archivo..."):
-                    texto = leer_archivo(archivo.read(), archivo.name)
-                    detector = detectar_organismo_con_ia(archivo.name)
+        archivos = st.file_uploader(
+            "PDF, Word o .txt — podés subir la norma + anexos juntos",
+            type=["pdf", "docx", "doc", "txt"],
+            accept_multiple_files=True
+        )
+        if archivos:
+            st.info(f"📄 {len(archivos)} archivo(s) cargado(s): {', '.join(f.name for f in archivos)}")
+            if st.button("⚖️ Analizar archivo(s)", use_container_width=True, type="primary"):
+                with st.spinner("Leyendo archivo(s)..."):
+                    # El primero es la norma principal; el resto son anexos
+                    norma = archivos[0]
+                    texto = leer_archivo(norma.read(), norma.name)
+                    detector = detectar_organismo_con_ia(norma.name)
                     organismo = detector.get("organismo", "BOLETIN")
+                    # Anexos adicionales subidos junto con la norma
+                    anexos_usuario = []
+                    for f in archivos[1:]:
+                        contenido = leer_archivo(f.read(), f.name)
+                        nombre_limpio = (
+                            f.name.upper()
+                            .replace(".PDF","").replace(".DOCX","").replace(".TXT","")
+                            .replace("_"," ").replace("-"," ").strip()
+                        )
+                        anexos_usuario.append({"nombre": nombre_limpio, "contenido": contenido})
                 if texto and len(texto) > 100:
                     st.session_state.update({
                         "texto_norma": texto, "organismo": organismo,
-                        "fuente": f"Archivo: {archivo.name}", "norma_nombre": archivo.name,
+                        "fuente": f"Archivo: {norma.name}", "norma_nombre": norma.name,
+                        "_anexos_iniciales": anexos_usuario,  # se usan en Fase 2
                     })
                     st.rerun()
 
@@ -188,8 +206,9 @@ else:
     organismo = st.session_state["organismo"]
 
     if not st.session_state["analisis"]:
+        anexos_iniciales = st.session_state.pop("_anexos_iniciales", [])
         with st.spinner("🤖 Claude analizando la norma como experto senior..."):
-            analisis = analizar_norma(texto, organismo)
+            analisis = analizar_norma(texto, organismo, anexos_usuario=anexos_iniciales or None)
             confianza = evaluar_confianza_anexo(texto, analisis.get("ncms_condiciones", {}))
             st.session_state["analisis"] = analisis
             st.session_state["confianza_anexo"] = confianza
