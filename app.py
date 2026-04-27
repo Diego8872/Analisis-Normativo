@@ -142,10 +142,9 @@ if not st.session_state["texto_norma"]:
                 })
                 st.rerun()
             else:
-                confianza = detector.get("confianza", "baja")
                 st.warning(
-                    f"⚠️ No encontré **{numero}** automáticamente "
-                    f"(organismo detectado: {organismo}, confianza: {confianza}). "
+                    f"⚠️ No encontré **{numero}** automáticamente. "
+                    f"{fuente if fuente.startswith('Error') else ''} "
                     "Podés subir el archivo o pegar el texto abajo."
                 )
 
@@ -301,16 +300,31 @@ else:
     with tab3:
         st.markdown("#### 📋 Análisis completo")
 
-        # Aviso de Anexos faltantes
         faltantes = analisis.get("anexos_faltantes", [])
         encontrados = analisis.get("anexos_encontrados", [])
         if encontrados:
             st.success(f"✅ Anexos incorporados: {', '.join(a['nombre'] for a in encontrados)}")
         if faltantes:
-            st.warning(
-                f"⚠️ Esta norma menciona **{', '.join(faltantes)}** que no pudieron obtenerse automáticamente. "
-                "Subílos como archivos para completar el análisis."
+            st.warning(f"⚠️ Esta norma menciona **{', '.join(faltantes)}** que no pudieron obtenerse automáticamente.")
+            anexos_subidos = st.file_uploader(
+                "Subí los Anexos para completar el análisis",
+                type=["pdf", "docx", "txt"],
+                accept_multiple_files=True,
+                key="anexos_upload"
             )
+            if anexos_subidos and st.button("📎 Incorporar Anexos al análisis", type="primary"):
+                from utils import leer_archivo
+                textos_anexos = []
+                for f in anexos_subidos:
+                    contenido = leer_archivo(f.read(), f.name)
+                    textos_anexos.append(f"--- {f.name} ---\n{contenido[:2000]}")
+                texto_extra = "\n\n".join(textos_anexos)
+                nuevo_analisis = st.session_state["analisis"].copy()
+                nuevo_analisis["analisis_completo"] += f"\n\n**ANEXOS INCORPORADOS:**\n{texto_extra}"
+                nuevo_analisis["anexos_faltantes"] = []
+                st.session_state["analisis"] = nuevo_analisis
+                st.success("✅ Anexos incorporados al análisis.")
+                st.rerun()
 
         st.markdown(analisis.get("analisis_completo", ""), unsafe_allow_html=False)
 
