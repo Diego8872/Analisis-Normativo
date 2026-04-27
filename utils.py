@@ -34,7 +34,7 @@ Ejemplo de respuesta: https://www.boletinoficial.gob.ar/detalleAviso/primera/305
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=200,
+            max_tokens=300,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt_busqueda}]
         )
@@ -60,19 +60,11 @@ Ejemplo de respuesta: https://www.boletinoficial.gob.ar/detalleAviso/primera/305
                 return texto, url_encontrada
 
         # Paso 3: si no hay URL o el fetch falló, pedir a Claude que traiga el texto
-        prompt_texto = f"""Buscá la norma argentina: "{numero}" y traé el texto COMPLETO.
-
-Incluí:
-- Considerandos completos
-- Todos los artículos
-- Anexos si están disponibles
-- Fecha de publicación
-
-Es FUNDAMENTAL que incluyas el texto real de la norma, no un resumen."""
+        prompt_texto = f"""Buscá "{numero}" norma argentina. Traé el texto completo con artículos y considerandos."""
 
         response2 = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=3000,
+            max_tokens=1500,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content": prompt_texto}]
         )
