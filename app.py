@@ -94,7 +94,6 @@ st.markdown("---")
 
 if not st.session_state["texto_norma"]:
 
-    # Chat inicial
     st.markdown("### 💬 Contame qué necesitás")
 
     if st.session_state["chat_inicial"] is None:
@@ -198,7 +197,6 @@ else:
     analisis = st.session_state["analisis"]
     confianza = st.session_state["confianza_anexo"]
 
-    # Card norma
     st.markdown(f"""
     <div class="norma-card">
         <h3>📄 {analisis.get('titulo', st.session_state['norma_nombre'])}</h3>
@@ -302,31 +300,48 @@ else:
 
         faltantes = analisis.get("anexos_faltantes", [])
         encontrados = analisis.get("anexos_encontrados", [])
+
         if encontrados:
             st.success(f"✅ Anexos incorporados: {', '.join(a['nombre'] for a in encontrados)}")
+
         if faltantes:
-            st.warning(f"⚠️ Esta norma menciona **{', '.join(faltantes)}** que no pudieron obtenerse automáticamente.")
+            st.warning(
+                f"⚠️ Esta norma menciona **{', '.join(faltantes)}** que no pudieron obtenerse automáticamente. "
+                "Subí los PDFs para regenerar el análisis completo."
+            )
             anexos_subidos = st.file_uploader(
-                "Subí los Anexos para completar el análisis",
+                "Subí los Anexos faltantes (PDF, Word o txt)",
                 type=["pdf", "docx", "txt"],
                 accept_multiple_files=True,
                 key="anexos_upload"
             )
-            if anexos_subidos and st.button("📎 Incorporar Anexos al análisis", type="primary"):
-                from utils import leer_archivo
-                textos_anexos = []
+            if anexos_subidos and st.button("📎 Incorporar Anexos y re-analizar", type="primary"):
+                # Construir lista estructurada — NO concatenar al texto de la norma
+                anexos_usuario = []
                 for f in anexos_subidos:
                     contenido = leer_archivo(f.read(), f.name)
-                    textos_anexos.append(f"--- {f.name} ---\n{contenido[:3000]}")
-                texto_anexos = "\n\n".join(textos_anexos)
-                # Regenerar análisis con texto completo + Anexos
-                texto_completo = st.session_state["texto_norma"] + "\n\nANEXOS:\n" + texto_anexos
-                with st.spinner("Regenerando análisis con Anexos..."):
-                    nuevo_analisis = analizar_norma(texto_completo, organismo)
-                    nuevo_analisis["anexos_faltantes"] = []
+                    nombre_limpio = (
+                        f.name.upper()
+                        .replace(".PDF", "").replace(".DOCX", "").replace(".TXT", "")
+                        .replace("_", " ").replace("-", " ").strip()
+                    )
+                    anexos_usuario.append({"nombre": nombre_limpio, "contenido": contenido})
+
+                with st.spinner(f"Regenerando análisis con {len(anexos_usuario)} anexo(s)..."):
+                    nuevo_analisis = analizar_norma(
+                        st.session_state["texto_norma"],  # norma original, sin modificar
+                        organismo,
+                        anexos_usuario=anexos_usuario     # anexos separados y estructurados
+                    )
+                    nueva_confianza = evaluar_confianza_anexo(
+                        st.session_state["texto_norma"],
+                        nuevo_analisis.get("ncms_condiciones", {})
+                    )
                     st.session_state["analisis"] = nuevo_analisis
-                    st.session_state["texto_norma"] = texto_completo
-                st.success("✅ Análisis regenerado con los Anexos.")
+                    st.session_state["confianza_anexo"] = nueva_confianza
+                    st.session_state["historial_chat"] = []  # resetear chat
+
+                st.success(f"✅ Análisis regenerado con {len(anexos_usuario)} anexo(s) incorporados.")
                 st.rerun()
 
         st.markdown(analisis.get("analisis_completo", ""), unsafe_allow_html=False)
@@ -338,6 +353,12 @@ else:
 
         with st.expander("Ver texto completo de la norma"):
             st.text(texto[:6000] + ("..." if len(texto) > 6000 else ""))
+
+        # Debug de cobertura — útil para verificar que llegan los anexos
+        debug = analisis.get("_debug", {})
+        if debug:
+            with st.expander("🔧 Debug — cobertura enviada al modelo"):
+                st.json(debug)
 
     # ── TAB 4: EXPORTAR ───────────────────────────────────────────────────────
     with tab4:
