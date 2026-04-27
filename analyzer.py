@@ -8,7 +8,7 @@ import re
 import anthropic
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-haiku-4-5-20251001"
 
 SISTEMA_EXPERTO = """Actuá como un experto senior en análisis normativo y regulatorio argentino, con especialización en derecho administrativo, comercio exterior, aduana (DGA), ARCA, AFIP, BCRA y normativa técnica.
 
