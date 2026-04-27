@@ -214,14 +214,13 @@ def analizar_norma(
 
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
 
-    # ── LLAMADA 1: secciones 1-4 + metadatos ─────────────────────────────────
-    prompt1 = f"""Analizá esta normativa argentina. Generá SOLO las secciones 1 a 4:
-1. RESUMEN EJECUTIVO
-2. PUNTOS CLAVE
-3. ANÁLISIS OPERATIVO
-4. RIESGOS Y ZONAS GRISES
+    # ── LLAMADA ÚNICA ────────────────────────────────────────────────────────
+    prompt = f"""Analizá esta normativa argentina. Sé conciso — máx 5 oraciones por sección.
 {aviso_cobertura}
-IMPORTANTE: Tenés el texto COMPLETO. NO digas que está incompleta. Sé exhaustivo en cada sección.
+{bloque_anexos}
+
+NORMATIVA:
+{texto_norma_truncado}
 
 Al final incluí metadatos entre <meta>...</meta>:
 <meta>
@@ -235,43 +234,19 @@ Al final incluí metadatos entre <meta>...</meta>:
   "tiene_anexo_ncm": false,
   "ncms_condiciones": {{}}
 }}
-</meta>
-{bloque_anexos}
+</meta>"""
 
-NORMATIVA:
-{texto_norma_truncado}"""
+    texto_respuesta = _llamar_modelo(system, prompt, max_tokens=2500)
 
-    texto_parte1 = _llamar_modelo(system, prompt1, max_tokens=2000)
-
-    # Extraer metadatos de parte 1
+    # Extraer metadatos
     meta = {}
-    meta_match = re.search(r"<meta>(.*?)</meta>", texto_parte1, re.DOTALL)
+    meta_match = re.search(r"<meta>(.*?)</meta>", texto_respuesta, re.DOTALL)
     if meta_match:
         try:
             meta = json.loads(meta_match.group(1).strip())
         except Exception:
             meta = {}
-        texto_parte1 = texto_parte1[:meta_match.start()].strip()
-
-    # ── LLAMADA 2: secciones 5-7 ─────────────────────────────────────────────
-    prompt2 = f"""Continuás el análisis de esta normativa argentina. Generá SOLO las secciones 5 y 6:
-5. CHECKLIST ACCIONABLE - pasos concretos para cumplir
-6. DUDAS ABIERTAS - qué confirmar con autoridad competente
-{aviso_cobertura}
-Contexto del análisis previo (secciones 1-4 ya generadas):
-{texto_parte1[:2000]}
-
-NORMATIVA:
-{texto_norma_truncado[:3000]}"""
-
-    texto_parte2 = _llamar_modelo(system, prompt2, max_tokens=1500)
-
-    # Limpiar cualquier <meta> residual de parte 2
-    meta_match2 = re.search(r"<meta>(.*?)</meta>", texto_parte2, re.DOTALL)
-    if meta_match2:
-        texto_parte2 = texto_parte2[:meta_match2.start()].strip()
-
-    texto_respuesta = texto_parte1 + "\n\n" + texto_parte2
+        texto_respuesta = texto_respuesta[:meta_match.start()].strip()
 
     return {
         "analisis_completo": texto_respuesta,
