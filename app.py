@@ -363,7 +363,7 @@ else:
                 st.success(f"✅ Análisis regenerado con {len(anexos_usuario)} anexo(s) incorporados.")
                 st.rerun()
 
-        st.markdown(analisis.get("analisis_completo", ""), unsafe_allow_html=False)
+        st.markdown(analisis.get("analisis_completo", ""), unsafe_allow_html=True)
 
         if analisis.get("ncms_condiciones"):
             st.markdown("**NCMs del Anexo**")
