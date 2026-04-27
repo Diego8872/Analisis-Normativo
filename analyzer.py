@@ -231,7 +231,7 @@ Al final, extraé metadatos entre <meta>...</meta>:
 }}
 </meta>"""
 
-    texto_respuesta = _llamar_modelo(system, prompt, max_tokens=4000)
+    texto_respuesta = _llamar_modelo(system, prompt, max_tokens=6000)
     meta = {}
     meta_match = re.search(r"<meta>(.*?)</meta>", texto_respuesta, re.DOTALL)
     if meta_match:
