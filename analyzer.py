@@ -1,6 +1,13 @@
 """
 analyzer.py — Motor Claude para análisis de normativa argentina
 Prompt experto senior + formato estructurado de 7 secciones
+
+CAMBIOS v2:
+- Límite norma: 5,000 → 9,500 chars (norma completa entra)
+- Límite por anexo: 600 → 7,000 chars (anexos completos entran)
+- Límite total input: techo 28,000 chars (~7,000 tokens) — seguro en Haiku Tier 1
+- Costo por análisis completo: ~$0.006
+- Lógica de anexos: acepta lista de textos ya extraídos (subidos por el usuario)
 """
 import os
 import json
@@ -10,9 +17,15 @@ import anthropic
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 MODEL = "claude-haiku-4-5-20251001"
 
+# ── Límites calibrados al contenido real ──────────────────────────────────────
+LIMITE_NORMA   = 9_500   # chars — cubre normas de hasta ~4 páginas completas
+LIMITE_ANEXO   = 7_000   # chars — cubre anexos de hasta ~3 páginas completas
+LIMITE_TOTAL   = 28_000  # chars — techo de seguridad Tier 1 (~7k tokens input)
+# ─────────────────────────────────────────────────────────────────────────────
+
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita."""
 
-FORMATO_SALIDA = """Formato OBLIGATORIO de 7 secciones:
+FORMATO_SALIDA = """Formato OBLIGATORIO de 7 secciones. Completá TODAS sin excepción:
 1. RESUMEN EJECUTIVO - qué regula, a quién afecta, qué cambia
 2. PUNTOS CLAVE - obligaciones, plazos, excepciones
 3. ANÁLISIS OPERATIVO - impacto práctico, acciones concretas
@@ -44,7 +57,11 @@ Ejemplos: "Com. A 8330"→BCRA, "RG 5424"→AFIP, "Res SIC 5/2026"→SIC, "Res 5
         text = re.sub(r"```json|```", "", response.content[0].text).strip()
         return json.loads(text)
     except Exception:
-        return {"organismo": "BOLETIN", "tipo": "resolución", "numero_limpio": numero, "confianza": "baja", "razonamiento": "No determinado"}
+        return {
+            "organismo": "BOLETIN", "tipo": "resolución",
+            "numero_limpio": numero, "confianza": "baja",
+            "razonamiento": "No determinado"
+        }
 
 
 def _detectar_y_bajar_anexos(texto: str) -> list:
@@ -66,7 +83,12 @@ def _detectar_y_bajar_anexos(texto: str) -> list:
                     for page in pdf.pages:
                         contenido += (page.extract_text() or "") + "\n"
                 if contenido.strip():
-                    anexos.append({"nombre": nombre, "url": url, "contenido": contenido.strip()})
+                    # FIX: usar LIMITE_ANEXO en lugar de hardcodear 600
+                    anexos.append({
+                        "nombre": nombre,
+                        "url": url,
+                        "contenido": contenido.strip()
+                    })
         except Exception:
             pass
     return anexos
@@ -84,24 +106,91 @@ def _detectar_anexos_faltantes(texto: str, encontrados: list) -> list:
     return faltantes
 
 
-def analizar_norma(texto_norma: str, organismo: str = "BOLETIN") -> dict:
-    # Intentar bajar Anexos referenciados en el texto
-    anexos_encontrados = _detectar_y_bajar_anexos(texto_norma)
-    anexos_faltantes = _detectar_anexos_faltantes(texto_norma, anexos_encontrados)
+def _construir_bloque_anexos(anexos_encontrados: list, anexos_usuario: list = None) -> tuple[str, list, list]:
+    """
+    Combina anexos descargados automáticamente + subidos por el usuario.
+    Respeta LIMITE_ANEXO por anexo y LIMITE_TOTAL global.
+    Retorna (bloque_texto, lista_completa, nombres_incluidos).
+    """
+    todos = list(anexos_encontrados)  # copia
 
-    contexto_anexos = ""
-    if anexos_encontrados:
-        contexto_anexos = "\n\nANEXOS DISPONIBLES:\n" + "\n\n".join(
-            f"--- {a['nombre']} ---\n{a['contenido'][:600]}"
-            for a in anexos_encontrados
-        )
+    # Agregar los subidos por el usuario (formato: {"nombre": str, "contenido": str})
+    if anexos_usuario:
+        for au in anexos_usuario:
+            nombre = au.get("nombre", "ANEXO SUBIDO")
+            # No duplicar si ya se descargó
+            if not any(nombre.upper() in a["nombre"].upper() for a in todos):
+                todos.append({"nombre": nombre, "contenido": au.get("contenido", ""), "url": None})
+
+    if not todos:
+        return "", [], []
+
+    bloques = []
+    chars_usados = 0
+    incluidos = []
+
+    for a in todos:
+        contenido = a["contenido"].strip()
+        # Truncar al límite por anexo
+        if len(contenido) > LIMITE_ANEXO:
+            contenido = contenido[:LIMITE_ANEXO] + "\n[... contenido truncado por longitud ...]"
+
+        # Verificar techo global
+        if chars_usados + len(contenido) > LIMITE_TOTAL:
+            break
+
+        bloques.append(f"--- {a['nombre']} ---\n{contenido}")
+        chars_usados += len(contenido)
+        incluidos.append(a["nombre"])
+
+    bloque_texto = "\n\nANEXOS DISPONIBLES:\n" + "\n\n".join(bloques) if bloques else ""
+    return bloque_texto, todos, incluidos
+
+
+def analizar_norma(
+    texto_norma: str,
+    organismo: str = "BOLETIN",
+    anexos_usuario: list = None   # ← NUEVO: lista de {"nombre": str, "contenido": str}
+) -> dict:
+    """
+    Analiza una norma con todos sus anexos.
+
+    anexos_usuario: anexos subidos manualmente por el usuario en Tab 3.
+    Cada elemento: {"nombre": "ANEXO I", "contenido": "texto extraído del PDF"}
+    """
+    # 1. Intentar bajar anexos referenciados en el texto
+    anexos_descargados = _detectar_y_bajar_anexos(texto_norma)
+
+    # 2. Combinar con los subidos por el usuario
+    bloque_anexos, todos_anexos, nombres_incluidos = _construir_bloque_anexos(
+        anexos_descargados, anexos_usuario or []
+    )
+
+    # 3. Detectar faltantes (menciones en norma que no están en ninguna fuente)
+    anexos_faltantes = _detectar_anexos_faltantes(texto_norma, todos_anexos)
+
+    # 4. Truncar norma al límite (respetando techo total)
+    chars_disponibles_norma = min(LIMITE_NORMA, LIMITE_TOTAL - len(bloque_anexos))
+    texto_norma_truncado = texto_norma[:chars_disponibles_norma]
+    if len(texto_norma) > chars_disponibles_norma:
+        texto_norma_truncado += "\n[... norma truncada por longitud total ...]"
+
+    # 5. Aviso de cobertura para el modelo
+    aviso_cobertura = ""
+    if nombres_incluidos:
+        aviso_cobertura = f"\nNOTA: Se incluyen los siguientes Anexos completos: {', '.join(nombres_incluidos)}. Analizalos en detalle.\n"
+    if anexos_faltantes:
+        aviso_cobertura += f"AVISO: Los siguientes Anexos no están disponibles: {', '.join(anexos_faltantes)}. Indicalo en el análisis.\n"
 
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
-    prompt = f"""Analizá esta normativa argentina con el formato de 7 secciones. NO cortes el análisis, completá todas las secciones.
-{contexto_anexos}
+
+    prompt = f"""Analizá esta normativa argentina con el formato de 7 secciones obligatorias.
+{aviso_cobertura}
+IMPORTANTE: Tenés el texto COMPLETO de la norma y sus anexos. NO digas que la norma está incompleta ni cortada. Completá las 7 secciones sin excepción.
+{bloque_anexos}
 
 NORMATIVA:
-{texto_norma[:5000]}
+{texto_norma_truncado}
 
 Al final, extraé metadatos entre <meta>...</meta>:
 <meta>
@@ -145,8 +234,14 @@ Al final, extraé metadatos entre <meta>...</meta>:
         "ncms_condiciones": meta.get("ncms_condiciones") or {},
         "puntos_clave": [],
         "obligaciones": [],
-        "anexos_encontrados": anexos_encontrados,
+        "anexos_encontrados": todos_anexos,
         "anexos_faltantes": anexos_faltantes,
+        # Info de diagnóstico — útil para debug en Streamlit
+        "_debug": {
+            "chars_norma_enviada": len(texto_norma_truncado),
+            "chars_anexos_enviados": len(bloque_anexos),
+            "anexos_incluidos": nombres_incluidos,
+        }
     }
 
 
