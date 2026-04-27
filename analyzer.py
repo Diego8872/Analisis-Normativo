@@ -49,20 +49,18 @@ LIMITE_TOTAL   = 28_000  # chars — techo de seguridad Tier 1 (~7k tokens input
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita.
 IMPORTANTE: Tu interlocutor es un despachante de aduana o profesional del comercio exterior. NUNCA recomendés contratar asesores aduanales ni despachantes — ellos ya son los expertos. Dirigí las recomendaciones a la operatoria concreta, no a buscar ayuda profesional externa."""
 
-FORMATO_SALIDA = """El análisis debe ser profesional y adaptado al tipo de norma. El cliente conoce su operación pero no la mecánica aduanera fina — escribí como un estudio especializado en comercio exterior, no como un manual técnico ni como un informe básico.
+FORMATO_SALIDA = """Análisis profesional para cliente de comercio exterior. Conciso y directo — el operador puede profundizar en el chat.
 
-Usá las secciones que correspondan a esta norma específica. No fuerces secciones que no aplican.
+LÍMITE ESTRICTO: máx 120 palabras por sección. Si no hay más que decir, terminá antes.
 
-Secciones disponibles — elegí las que correspondan:
-- RESUMEN EJECUTIVO — qué regula, a quién afecta, qué cambia. Prosa corta, máx 5 oraciones.
-- PUNTOS CLAVE — obligaciones, plazos y excepciones que realmente importan. Bullets concisos.
-- SUBREGÍMENES / MECANISMOS — si la norma crea códigos, regímenes o mecanismos específicos, mostrá tabla con código, descripción y tributos aplicables.
-- ANÁLISIS OPERATIVO — qué tiene que hacer el operador. Pasos de alto nivel, directo, con opciones y riesgo principal por paso.
-- RIESGOS Y ZONAS GRISES — ambigüedades con impacto concreto. Marcá 🔴 alto / 🟡 medio.
-- CHECKLIST — ítems accionables con ☐, lo que hay que tener listo antes de operar.
-- DUDAS ABIERTAS — preguntas que la norma no responde, para confirmar con la autoridad competente.
+Usá solo las secciones que aplican a esta norma:
+- RESUMEN EJECUTIVO — qué regula, a quién afecta, qué cambia. Prosa, máx 5 oraciones.
+- PUNTOS CLAVE — máx 6 bullets con las obligaciones y plazos que realmente importan.
+- SUBREGÍMENES / MECANISMOS — solo si la norma los crea. Tabla: código | descripción | tributos.
+- ANÁLISIS OPERATIVO — máx 4 pasos de alto nivel con riesgo principal por paso.
+- RIESGOS Y ZONAS GRISES — máx 3, con 🔴 alto / 🟡 medio.
 
-Diferenciá siempre norma (lo que dice textualmente) de interpretación (lo que inferís). Sin recomendar asesores externos."""
+Diferenciá norma (texto) de interpretación (inferencia). Sin relleno, sin repetir info entre secciones."""
 
 
 def detectar_organismo_con_ia(numero: str) -> dict:
@@ -241,7 +239,7 @@ Al final incluí metadatos entre <meta>...</meta>:
 NORMATIVA:
 {texto_norma_truncado}"""
 
-    texto_parte1 = _llamar_modelo(system, prompt1, max_tokens=4000)
+    texto_parte1 = _llamar_modelo(system, prompt1, max_tokens=5000)
 
     # Extraer metadatos de parte 1
     meta = {}
@@ -264,7 +262,7 @@ Contexto del análisis previo (secciones 1-4 ya generadas):
 NORMATIVA:
 {texto_norma_truncado[:3000]}"""
 
-    texto_parte2 = _llamar_modelo(system, prompt2, max_tokens=3000)
+    texto_parte2 = _llamar_modelo(system, prompt2, max_tokens=4000)
 
     # Limpiar cualquier <meta> residual de parte 2
     meta_match2 = re.search(r"<meta>(.*?)</meta>", texto_parte2, re.DOTALL)
