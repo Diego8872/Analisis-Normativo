@@ -209,15 +209,16 @@ def analizar_norma(
 
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
 
-    prompt = f"""Analizá esta normativa argentina con el formato de 7 secciones obligatorias.
+    # ── LLAMADA 1: secciones 1-4 + metadatos ─────────────────────────────────
+    prompt1 = f"""Analizá esta normativa argentina. Generá SOLO las secciones 1 a 4:
+1. RESUMEN EJECUTIVO
+2. PUNTOS CLAVE
+3. ANÁLISIS OPERATIVO
+4. RIESGOS Y ZONAS GRISES
 {aviso_cobertura}
-IMPORTANTE: Tenés el texto COMPLETO de la norma y sus anexos. NO digas que la norma está incompleta ni cortada. Completá las 7 secciones sin excepción.
-{bloque_anexos}
+IMPORTANTE: Tenés el texto COMPLETO. NO digas que está incompleta. Sé exhaustivo en cada sección.
 
-NORMATIVA:
-{texto_norma_truncado}
-
-Al final, extraé metadatos entre <meta>...</meta>:
+Al final incluí metadatos entre <meta>...</meta>:
 <meta>
 {{
   "titulo": "identificación completa",
@@ -229,17 +230,44 @@ Al final, extraé metadatos entre <meta>...</meta>:
   "tiene_anexo_ncm": false,
   "ncms_condiciones": {{}}
 }}
-</meta>"""
+</meta>
+{bloque_anexos}
 
-    texto_respuesta = _llamar_modelo(system, prompt, max_tokens=6000)
+NORMATIVA:
+{texto_norma_truncado}"""
+
+    texto_parte1 = _llamar_modelo(system, prompt1, max_tokens=4000)
+
+    # Extraer metadatos de parte 1
     meta = {}
-    meta_match = re.search(r"<meta>(.*?)</meta>", texto_respuesta, re.DOTALL)
+    meta_match = re.search(r"<meta>(.*?)</meta>", texto_parte1, re.DOTALL)
     if meta_match:
         try:
             meta = json.loads(meta_match.group(1).strip())
         except Exception:
             meta = {}
-        texto_respuesta = texto_respuesta[:meta_match.start()].strip()
+        texto_parte1 = texto_parte1[:meta_match.start()].strip()
+
+    # ── LLAMADA 2: secciones 5-7 ─────────────────────────────────────────────
+    prompt2 = f"""Continuás el análisis de esta normativa argentina. Generá SOLO las secciones 5 a 7:
+5. EJEMPLO PRÁCTICO - caso concreto real con números y pasos
+6. CHECKLIST ACCIONABLE - pasos concretos para cumplir
+7. DUDAS ABIERTAS - qué confirmar con autoridad competente
+{aviso_cobertura}
+Contexto del análisis previo (secciones 1-4 ya generadas):
+{texto_parte1[:2000]}
+
+NORMATIVA:
+{texto_norma_truncado[:3000]}"""
+
+    texto_parte2 = _llamar_modelo(system, prompt2, max_tokens=3000)
+
+    # Limpiar cualquier <meta> residual de parte 2
+    meta_match2 = re.search(r"<meta>(.*?)</meta>", texto_parte2, re.DOTALL)
+    if meta_match2:
+        texto_parte2 = texto_parte2[:meta_match2.start()].strip()
+
+    texto_respuesta = texto_parte1 + "\n\n" + texto_parte2
 
     return {
         "analisis_completo": texto_respuesta,
