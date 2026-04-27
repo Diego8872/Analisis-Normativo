@@ -10,43 +10,16 @@ import anthropic
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 MODEL = "claude-haiku-4-5-20251001"
 
-SISTEMA_EXPERTO = """Actuá como un experto senior en análisis normativo y regulatorio argentino, con especialización en derecho administrativo, comercio exterior, aduana (DGA), ARCA, AFIP, BCRA y normativa técnica.
+SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita."""
 
-Tu rol es analizar resoluciones, disposiciones, leyes y normativa en general de forma rigurosa, crítica y estructurada.
-
-Principios de comportamiento:
-- No asumas que el texto es claro: detectá ambigüedades, vacíos y posibles interpretaciones.
-- No simplifiques en exceso: priorizá precisión antes que rapidez.
-- Señalá inconsistencias, contradicciones o problemas prácticos de aplicación.
-- Pensá como alguien que debe aplicar la norma en la vida real (operador, despachante, empresa).
-- Si algo no está explícito en la norma, indicarlo claramente (no inventar).
-- Diferenciá siempre entre lo que dice la norma y tu interpretación.
-- Usá lenguaje claro pero técnico. Evitá relleno o explicaciones genéricas.
-- No repitas el texto de la norma: interpretalo."""
-
-FORMATO_SALIDA = """
-Formato de salida OBLIGATORIO:
-
-1. RESUMEN EJECUTIVO (máximo 10 líneas)
-- Qué regula / A quién afecta / Qué cambia respecto a antes
-
-2. PUNTOS CLAVE
-- Obligaciones, prohibiciones, requisitos, plazos, montos, excepciones
-
-3. ANÁLISIS OPERATIVO
-- Impacto práctico / Acciones concretas a tomar
-
-4. RIESGOS Y ZONAS GRISES
-- Ambigüedades / Conflictos de interpretación / Riesgos de incumplimiento
-
-5. EJEMPLO PRÁCTICO
-- Caso concreto aplicado a una empresa o situación real
-
-6. CHECKLIST ACCIONABLE
-- Pasos concretos para cumplir la norma
-
-7. DUDAS ABIERTAS
-- Qué no queda claro / Qué confirmar con autoridad competente"""
+FORMATO_SALIDA = """Formato OBLIGATORIO de 7 secciones:
+1. RESUMEN EJECUTIVO - qué regula, a quién afecta, qué cambia
+2. PUNTOS CLAVE - obligaciones, plazos, excepciones
+3. ANÁLISIS OPERATIVO - impacto práctico, acciones concretas
+4. RIESGOS Y ZONAS GRISES - ambigüedades, conflictos, incumplimientos
+5. EJEMPLO PRÁCTICO - caso concreto real
+6. CHECKLIST ACCIONABLE - pasos para cumplir
+7. DUDAS ABIERTAS - qué confirmar con autoridad competente"""
 
 
 def detectar_organismo_con_ia(numero: str) -> dict:
@@ -128,7 +101,7 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN") -> dict:
 {contexto_anexos}
 
 NORMATIVA:
-{texto_norma[:5000]}
+{texto_norma[:3000]}
 
 Al final, extraé metadatos entre <meta>...</meta>:
 <meta>
