@@ -132,7 +132,7 @@ def generar_pdf(analisis: dict, resultados_cruce: list = None) -> bytes:
         if not linea_limpia:
             continue
         # Títulos de sección
-        if re.match(r'^\d+\.\s+[A-ZÁÉÍÓÚA-Z\s]+$', linea):
+        if re.match(r'^\d+\.\s+\S+', linea):
             story.append(Paragraph(linea_limpia, s_h1))
         elif linea.startswith('- ') or linea.startswith('• '):
             story.append(Paragraph(f"• {_limpiar_para_reportlab(linea[2:])}", s_bullet))
@@ -234,7 +234,7 @@ def generar_ppt(analisis: dict, resultados_cruce: list = None) -> bytes:
     seccion_actual_lineas = []
 
     for linea in lineas_totales:
-        if re.match(r'^\d+\.\s+[A-ZÁÉÍÓÚA-Z\s]+$', linea.strip()):
+        if re.match(r'^\d+\.\s+\S+', linea.strip()):
             if seccion_actual_titulo:
                 secciones.append((seccion_actual_titulo, seccion_actual_lineas))
             seccion_actual_titulo = linea.strip()
