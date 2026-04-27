@@ -300,6 +300,18 @@ else:
     # ── TAB 3: ANÁLISIS COMPLETO ──────────────────────────────────────────────
     with tab3:
         st.markdown("#### 📋 Análisis completo")
+
+        # Aviso de Anexos faltantes
+        faltantes = analisis.get("anexos_faltantes", [])
+        encontrados = analisis.get("anexos_encontrados", [])
+        if encontrados:
+            st.success(f"✅ Anexos incorporados: {', '.join(a['nombre'] for a in encontrados)}")
+        if faltantes:
+            st.warning(
+                f"⚠️ Esta norma menciona **{', '.join(faltantes)}** que no pudieron obtenerse automáticamente. "
+                "Subílos como archivos para completar el análisis."
+            )
+
         st.markdown(analisis.get("analisis_completo", ""), unsafe_allow_html=False)
 
         if analisis.get("ncms_condiciones"):
@@ -312,34 +324,59 @@ else:
 
     # ── TAB 4: EXPORTAR ───────────────────────────────────────────────────────
     with tab4:
-        st.markdown("#### 📥 Exportar")
-        c1, c2 = st.columns(2)
+        st.markdown("#### 📥 Exportar análisis")
+        from exports import generar_word, generar_pdf, generar_ppt
+
+        nombre_base = f"analisis_{datetime.now().strftime('%Y%m%d_%H%M')}"
+        resultados = st.session_state.get("resultados_cruce")
+
+        c1, c2, c3 = st.columns(3)
 
         with c1:
-            st.markdown("**Excel con semáforo**")
-            if st.session_state["resultados_cruce"]:
-                df_exp = pd.DataFrame(st.session_state["resultados_cruce"])
-                buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    df_exp.to_excel(writer, index=False, sheet_name="Análisis completo")
-                    df_enc = df_exp[df_exp["estado"] == "ENCUADRA"]
-                    df_no  = df_exp[df_exp["estado"] != "ENCUADRA"]
-                    if not df_enc.empty: df_enc.to_excel(writer, index=False, sheet_name="Encuadran")
-                    if not df_no.empty:  df_no.to_excel(writer, index=False, sheet_name="No encuadran")
-                buf.seek(0)
-                st.download_button("⬇️ Descargar Excel", data=buf,
-                    file_name=f"analisis_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            st.markdown("**📝 Word (.docx)**")
+            if st.button("Generar Word", use_container_width=True):
+                with st.spinner("Generando..."):
+                    word_bytes = generar_word(analisis, resultados)
+                st.download_button("⬇️ Descargar Word", data=word_bytes,
+                    file_name=f"{nombre_base}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True)
-            else:
-                st.info("Hacé el cruce primero para exportar el Excel.")
 
         with c2:
-            st.markdown("**Memo ejecutivo**")
-            if st.button("📝 Generar memo", use_container_width=True):
-                with st.spinner("Redactando..."):
-                    memo = generar_resumen_ejecutivo(analisis, st.session_state["resultados_cruce"], organismo)
-                st.text_area("Memo", memo, height=350)
-                st.download_button("⬇️ Descargar memo (.txt)", data=memo.encode("utf-8"),
-                    file_name=f"memo_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                    mime="text/plain")
+            st.markdown("**📄 PDF**")
+            if st.button("Generar PDF", use_container_width=True):
+                with st.spinner("Generando..."):
+                    pdf_bytes = generar_pdf(analisis, resultados)
+                st.download_button("⬇️ Descargar PDF", data=pdf_bytes,
+                    file_name=f"{nombre_base}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True)
+
+        with c3:
+            st.markdown("**📊 PowerPoint (.pptx)**")
+            if st.button("Generar PPT", use_container_width=True):
+                with st.spinner("Generando..."):
+                    ppt_bytes = generar_ppt(analisis, resultados)
+                st.download_button("⬇️ Descargar PPT", data=ppt_bytes,
+                    file_name=f"{nombre_base}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("**📊 Excel con semáforo** (solo si hiciste cruce con catálogo)")
+        if resultados:
+            df_exp = pd.DataFrame(resultados)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df_exp.to_excel(writer, index=False, sheet_name="Análisis completo")
+                df_enc = df_exp[df_exp["estado"] == "ENCUADRA"]
+                df_no  = df_exp[df_exp["estado"] != "ENCUADRA"]
+                if not df_enc.empty: df_enc.to_excel(writer, index=False, sheet_name="Encuadran")
+                if not df_no.empty:  df_no.to_excel(writer, index=False, sheet_name="No encuadran")
+            buf.seek(0)
+            st.download_button("⬇️ Descargar Excel", data=buf,
+                file_name=f"{nombre_base}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True)
+        else:
+            st.info("Hacé el cruce con catálogo primero para exportar el Excel.")
