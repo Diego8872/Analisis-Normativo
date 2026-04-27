@@ -50,13 +50,13 @@ LIMITE_TOTAL   = 28_000  # chars — techo de seguridad Tier 1 (~7k tokens input
 
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita."""
 
-FORMATO_SALIDA = """Formato OBLIGATORIO de 6 secciones. Completá TODAS sin excepción:
-1. RESUMEN EJECUTIVO - qué regula, a quién afecta, qué cambia
-2. PUNTOS CLAVE - obligaciones, plazos, excepciones
-3. ANÁLISIS OPERATIVO - impacto práctico, acciones concretas
-4. RIESGOS Y ZONAS GRISES - ambigüedades, conflictos, incumplimientos
-5. CHECKLIST ACCIONABLE - pasos concretos para cumplir
-6. DUDAS ABIERTAS - qué confirmar con autoridad competente"""
+FORMATO_SALIDA = """Formato OBLIGATORIO de 6 secciones. Estilo: resumen ejecutivo conciso. El operador puede pedir detalle adicional en el chat.
+1. RESUMEN EJECUTIVO - qué regula, a quién afecta, qué cambia (máx 150 palabras)
+2. PUNTOS CLAVE - obligaciones y plazos principales, máx 6 ítems
+3. ANÁLISIS OPERATIVO - flujo simplificado, máx 4 pasos de alto nivel
+4. RIESGOS Y ZONAS GRISES - máx 3 riesgos con su impacto
+5. CHECKLIST ACCIONABLE - máx 8 ítems concretos y accionables
+6. DUDAS ABIERTAS - máx 4 preguntas para confirmar con ARCA/autoridad"""
 
 
 def detectar_organismo_con_ia(numero: str) -> dict:
