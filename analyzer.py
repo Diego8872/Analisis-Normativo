@@ -101,7 +101,7 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN") -> dict:
 {contexto_anexos}
 
 NORMATIVA:
-{texto_norma[:3000]}
+{texto_norma[:6000]}
 
 Al final, extraé metadatos entre <meta>...</meta>:
 <meta>
