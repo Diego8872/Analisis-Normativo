@@ -19,11 +19,12 @@ client_claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", 
 client_groq   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
 MODEL_GROQ   = "llama-3.3-70b-versatile"
-MODEL_CLAUDE = "claude-haiku-4-5-20251001"  # fallback
+MODEL_CLAUDE = "claude-sonnet-4-6"  # análisis principal
+MODEL_FALLBACK = "claude-haiku-4-5-20251001"  # fallback si falla Sonnet
 
 
 def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
-    """Claude Haiku primero (calidad), Groq como fallback (si Haiku falla o timeout)."""
+    """Sonnet primero (calidad), Haiku como fallback."""
     try:
         response = client_claude.messages.create(
             model=MODEL_CLAUDE, max_tokens=max_tokens,
@@ -32,15 +33,12 @@ def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
         )
         return response.content[0].text.strip()
     except Exception:
-        response = client_groq.chat.completions.create(
-            model=MODEL_GROQ,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": prompt},
-            ]
+        response = client_claude.messages.create(
+            model=MODEL_FALLBACK, max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}]
         )
-        return response.choices[0].message.content.strip()
+        return response.content[0].text.strip()
 
 # ── Límites calibrados al contenido real ──────────────────────────────────────
 LIMITE_NORMA   = 9_500   # chars — cubre normas de hasta ~4 páginas completas
@@ -51,15 +49,20 @@ LIMITE_TOTAL   = 28_000  # chars — techo de seguridad Tier 1 (~7k tokens input
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita.
 IMPORTANTE: Tu interlocutor es un despachante de aduana o profesional del comercio exterior. NUNCA recomendés contratar asesores aduanales ni despachantes — ellos ya son los expertos. Dirigí las recomendaciones a la operatoria concreta, no a buscar ayuda profesional externa."""
 
-FORMATO_SALIDA = """Analizás como un experto que le habla a otro experto. Sin introduciones, sin paja, sin recomendar buscar ayuda externa. Directo al punto operativo. El operador puede pedir detalle en el chat.
+FORMATO_SALIDA = """El análisis debe ser profesional y adaptado al tipo de norma. El cliente conoce su operación pero no la mecánica aduanera fina — escribí como un estudio especializado en comercio exterior, no como un manual técnico ni como un informe básico.
 
-Formato de 6 secciones:
-1. RESUMEN EJECUTIVO — qué cambia, a quién afecta, desde cuándo. Máx 5 oraciones.
-2. PUNTOS CLAVE — las obligaciones y plazos que realmente importan. Máx 6 bullets concisos.
-3. ANÁLISIS OPERATIVO — qué tiene que hacer el operador en la práctica. Máx 4 pasos de alto nivel, sin detallar subpasos.
-4. RIESGOS Y ZONAS GRISES — ambigüedades reales de la norma que pueden generar contingencias. Máx 3 riesgos concretos.
-5. CHECKLIST — lo que hay que tener listo antes de operar. Máx 8 ítems.
-6. DUDAS ABIERTAS — preguntas que la norma no responde y que conviene consultar con ARCA. Máx 4."""
+Usá las secciones que correspondan a esta norma específica. No fuerces secciones que no aplican.
+
+Secciones disponibles — elegí las que correspondan:
+- RESUMEN EJECUTIVO — qué regula, a quién afecta, qué cambia. Prosa corta, máx 5 oraciones.
+- PUNTOS CLAVE — obligaciones, plazos y excepciones que realmente importan. Bullets concisos.
+- SUBREGÍMENES / MECANISMOS — si la norma crea códigos, regímenes o mecanismos específicos, mostrá tabla con código, descripción y tributos aplicables.
+- ANÁLISIS OPERATIVO — qué tiene que hacer el operador. Pasos de alto nivel, directo, con opciones y riesgo principal por paso.
+- RIESGOS Y ZONAS GRISES — ambigüedades con impacto concreto. Marcá 🔴 alto / 🟡 medio.
+- CHECKLIST — ítems accionables con ☐, lo que hay que tener listo antes de operar.
+- DUDAS ABIERTAS — preguntas que la norma no responde, para confirmar con la autoridad competente.
+
+Diferenciá siempre norma (lo que dice textualmente) de interpretación (lo que inferís). Sin recomendar asesores externos."""
 
 
 def detectar_organismo_con_ia(numero: str) -> dict:
