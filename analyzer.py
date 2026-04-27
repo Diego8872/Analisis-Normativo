@@ -23,8 +23,15 @@ MODEL_CLAUDE = "claude-haiku-4-5-20251001"  # fallback
 
 
 def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
-    """Groq primero, Claude Haiku como fallback."""
+    """Claude Haiku primero (calidad), Groq como fallback (si Haiku falla o timeout)."""
     try:
+        response = client_claude.messages.create(
+            model=MODEL_CLAUDE, max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip()
+    except Exception:
         response = client_groq.chat.completions.create(
             model=MODEL_GROQ,
             max_tokens=max_tokens,
@@ -34,13 +41,6 @@ def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
             ]
         )
         return response.choices[0].message.content.strip()
-    except Exception:
-        response = client_claude.messages.create(
-            model=MODEL_CLAUDE, max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text.strip()
 
 # ── Límites calibrados al contenido real ──────────────────────────────────────
 LIMITE_NORMA   = 9_500   # chars — cubre normas de hasta ~4 páginas completas
