@@ -4,17 +4,21 @@ Estrategia en cascada:
   1. Web search apuntando al Boletín Oficial → fetch directo
   2. Web search apuntando a Infoleg → fetch directo
   3. Web search genérico (fallback)
+  
+  Para web search: Anthropic primero → si falla por saldo → Groq
 """
 import re
 import io
 import os
 import requests
 import anthropic
+from groq import Groq
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AnálisisNormativo/1.0)"}
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+client_claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+client_groq   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+MODEL_GROQ    = "llama-3.3-70b-versatile"
 
-# Dominios oficiales reconocidos (para extraer URLs prioritarias)
 DOMINIOS_OFICIALES = [
     "boletinoficial.gob.ar",
     "infoleg.gob.ar",
@@ -26,12 +30,17 @@ DOMINIOS_OFICIALES = [
 ]
 
 
+def _es_error_saldo(e: Exception) -> bool:
+    """Detecta si el error es por saldo insuficiente en Anthropic."""
+    msg = str(e).lower()
+    return "credit" in msg or "balance" in msg or "billing" in msg or "402" in msg
+
+
 def _extraer_url_oficial(texto: str) -> str | None:
     """Extrae la primera URL de un dominio oficial del texto dado."""
     urls = re.findall(r'https?://[^\s\'"<>)\]]+', texto)
     for url in urls:
         if any(d in url for d in DOMINIOS_OFICIALES):
-            # Limpiar caracteres sueltos al final
             url = re.sub(r'[.,;)\]]+$', '', url)
             return url
     return None
@@ -58,28 +67,61 @@ def _fetch_texto(url: str) -> str:
         return ""
 
 
+def _web_search_claude(prompt: str, max_tokens: int = 1000) -> str:
+    """Web search usando Anthropic con tool web_search."""
+    response = client_claude.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}]
+    )
+    texto = ""
+    for block in response.content:
+        if hasattr(block, "text") and block.text:
+            texto += block.text + "\n"
+        if hasattr(block, "type") and block.type == "tool_result":
+            if hasattr(block, "content"):
+                for sub in block.content:
+                    if hasattr(sub, "text"):
+                        texto += sub.text + "\n"
+    return texto
+
+
+def _web_search_groq(prompt: str) -> str:
+    """Web search usando Groq (sin tool nativo — pide que infiera la URL)."""
+    response = client_groq.chat.completions.create(
+        model=MODEL_GROQ,
+        max_tokens=500,
+        messages=[
+            {
+                "role": "system",
+                "content": "Sos un asistente especializado en normativa argentina. "
+                           "Cuando te pidan buscar una norma, construí la URL más probable "
+                           "en boletinoficial.gob.ar o infoleg.gob.ar e indicála claramente."
+            },
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _web_search_con_fallback(prompt: str, max_tokens_claude: int = 1000) -> str:
+    """Intenta web search con Anthropic; si falla por saldo, usa Groq."""
+    try:
+        return _web_search_claude(prompt, max_tokens_claude)
+    except Exception as e:
+        if _es_error_saldo(e):
+            return _web_search_groq(prompt)
+        raise
+
+
 def _web_search_y_fetch(prompt_busqueda: str) -> tuple[str, str]:
     """
-    Hace web search con el prompt dado, extrae URL oficial y hace fetch.
-    Returns: (texto, fuente) — texto vacío si no encuentra nada útil.
+    Hace web search, extrae URL oficial y hace fetch.
+    Returns: (texto, fuente)
     """
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1000,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt_busqueda}]
-        )
-
-        texto_respuesta = ""
-        for block in response.content:
-            if hasattr(block, "text") and block.text:
-                texto_respuesta += block.text + "\n"
-            if hasattr(block, "type") and block.type == "tool_result":
-                if hasattr(block, "content"):
-                    for sub in block.content:
-                        if hasattr(sub, "text"):
-                            texto_respuesta += sub.text + "\n"
+        texto_respuesta = _web_search_con_fallback(prompt_busqueda)
 
         url = _extraer_url_oficial(texto_respuesta)
         if url:
@@ -87,7 +129,6 @@ def _web_search_y_fetch(prompt_busqueda: str) -> tuple[str, str]:
             if len(texto_fetcheado.strip()) > 300:
                 return texto_fetcheado, url
 
-        # Si no encontró URL oficial, devolver lo que trajo el search (fallback parcial)
         if len(texto_respuesta.strip()) > 300:
             return texto_respuesta.strip(), "Fuentes oficiales (web search)"
 
@@ -119,41 +160,13 @@ def buscar_norma(numero: str) -> tuple[str, str]:
     if texto and len(texto) > 300:
         return texto, fuente
 
-    # ── PASO 3: Fallback genérico (comportamiento anterior) ───────────────────
-    prompt_generico = (
+    # ── PASO 3: Fallback genérico ─────────────────────────────────────────────
+    texto, fuente = _web_search_y_fetch(
         f'Buscá la norma argentina "{numero}" y traé el texto completo con todos '
-        f'sus artículos y considerandos. Priorizá fuentes como Infoleg, ARCA, BCRA '
-        f'o Boletín Oficial. Incluí número, organismo emisor, fecha y texto íntegro.'
+        f'sus artículos y considerandos. Priorizá Infoleg, ARCA, BCRA o Boletín Oficial.'
     )
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=3000,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt_generico}]
-        )
-
-        texto_completo = ""
-        url_encontrada = "Fuentes oficiales (web search)"
-
-        for block in response.content:
-            if hasattr(block, "text") and block.text:
-                texto_completo += block.text + "\n"
-            if hasattr(block, "type") and block.type == "tool_result":
-                if hasattr(block, "content"):
-                    for sub in block.content:
-                        if hasattr(sub, "text"):
-                            texto_completo += sub.text + "\n"
-
-        url = _extraer_url_oficial(texto_completo)
-        if url:
-            url_encontrada = url
-
-        if len(texto_completo.strip()) > 300:
-            return texto_completo.strip(), url_encontrada
-
-    except Exception as e:
-        return "", f"Error: {e}"
+    if texto and len(texto) > 300:
+        return texto, fuente
 
     return "", "No encontrada — subí el PDF manualmente."
 
