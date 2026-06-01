@@ -1,5 +1,9 @@
 """
 utils.py — Búsqueda de normas con web search + fetch + lectura de archivos
+Estrategia en cascada:
+  1. Web search apuntando al Boletín Oficial → fetch directo
+  2. Web search apuntando a Infoleg → fetch directo
+  3. Web search genérico (fallback)
 """
 import re
 import io
@@ -10,62 +14,31 @@ import anthropic
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AnálisisNormativo/1.0)"}
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
-
-def buscar_norma(numero: str) -> tuple[str, str]:
-    """
-    Busca la norma usando web search.
-    Estrategia: pedir directamente el texto, no solo la URL.
-    Returns: (texto_norma, fuente)
-    """
-    # Estrategia única: pedir texto completo directamente con web search
-    prompt = f"""Buscá la norma argentina "{numero}" y traé el texto completo con todos sus artículos y considerandos.
-Priorizá fuentes como Infoleg, ARCA, BCRA, o Boletín Oficial.
-Incluí número, organismo emisor, fecha, y el texto íntegro de los artículos."""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=3000,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        # Leer TODOS los bloques de texto (no solo el primero)
-        texto_completo = ""
-        url_encontrada = "Fuentes oficiales (web search)"
-
-        for block in response.content:
-            # Bloque de texto final de Claude
-            if hasattr(block, "text") and block.text:
-                texto_completo += block.text + "\n"
-            # Resultado de tool — extraer URL y contenido
-            if hasattr(block, "type") and block.type == "tool_result":
-                if hasattr(block, "content"):
-                    for sub in block.content:
-                        if hasattr(sub, "text"):
-                            texto_completo += sub.text + "\n"
-            # tool_use — capturar query ejecutada (debug)
-            if hasattr(block, "type") and block.type == "tool_use":
-                pass
-
-        # Extraer primera URL oficial mencionada
-        urls = re.findall(r'https?://[^\s\'"<>)\]]+', texto_completo)
-        for url in urls:
-            if any(d in url for d in ["infoleg", "arca.gob", "bcra.gob", "boletinoficial", "argentina.gob"]):
-                url_encontrada = url
-                break
-
-        if len(texto_completo.strip()) > 300:
-            return texto_completo.strip(), url_encontrada
-
-    except Exception as e:
-        return "", f"Error: {e}"
-
-    return "", "No encontrada — subí el PDF manualmente."
+# Dominios oficiales reconocidos (para extraer URLs prioritarias)
+DOMINIOS_OFICIALES = [
+    "boletinoficial.gob.ar",
+    "infoleg.gob.ar",
+    "servicios.infoleg.gob.ar",
+    "arca.gob.ar",
+    "biblioteca.arca.gob.ar",
+    "bcra.gob.ar",
+    "argentina.gob.ar/normativa",
+]
 
 
-def _fetch_url(url: str) -> str:
-    """Descarga y extrae el texto de una URL."""
+def _extraer_url_oficial(texto: str) -> str | None:
+    """Extrae la primera URL de un dominio oficial del texto dado."""
+    urls = re.findall(r'https?://[^\s\'"<>)\]]+', texto)
+    for url in urls:
+        if any(d in url for d in DOMINIOS_OFICIALES):
+            # Limpiar caracteres sueltos al final
+            url = re.sub(r'[.,;)\]]+$', '', url)
+            return url
+    return None
+
+
+def _fetch_texto(url: str) -> str:
+    """Descarga y extrae el texto limpio de una URL (HTML o PDF)."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
@@ -80,9 +53,109 @@ def _fetch_url(url: str) -> str:
             tag.decompose()
         texto = soup.get_text(separator="\n", strip=True)
         texto = re.sub(r'\n{3,}', '\n\n', texto)
-        return texto[:8000]
+        return texto[:12000]
     except Exception:
         return ""
+
+
+def _web_search_y_fetch(prompt_busqueda: str) -> tuple[str, str]:
+    """
+    Hace web search con el prompt dado, extrae URL oficial y hace fetch.
+    Returns: (texto, fuente) — texto vacío si no encuentra nada útil.
+    """
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": prompt_busqueda}]
+        )
+
+        texto_respuesta = ""
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                texto_respuesta += block.text + "\n"
+            if hasattr(block, "type") and block.type == "tool_result":
+                if hasattr(block, "content"):
+                    for sub in block.content:
+                        if hasattr(sub, "text"):
+                            texto_respuesta += sub.text + "\n"
+
+        url = _extraer_url_oficial(texto_respuesta)
+        if url:
+            texto_fetcheado = _fetch_texto(url)
+            if len(texto_fetcheado.strip()) > 300:
+                return texto_fetcheado, url
+
+        # Si no encontró URL oficial, devolver lo que trajo el search (fallback parcial)
+        if len(texto_respuesta.strip()) > 300:
+            return texto_respuesta.strip(), "Fuentes oficiales (web search)"
+
+    except Exception as e:
+        return "", f"Error: {e}"
+
+    return "", ""
+
+
+def buscar_norma(numero: str) -> tuple[str, str]:
+    """
+    Busca la norma argentina usando estrategia en cascada.
+    Returns: (texto_norma, fuente)
+    """
+
+    # ── PASO 1: Boletín Oficial ───────────────────────────────────────────────
+    texto, fuente = _web_search_y_fetch(
+        f'Buscá "{numero}" en el sitio boletinoficial.gob.ar. '
+        f'Necesito la URL exacta del aviso en boletinoficial.gob.ar/detalleAviso/...'
+    )
+    if texto and len(texto) > 300:
+        return texto, fuente
+
+    # ── PASO 2: Infoleg ───────────────────────────────────────────────────────
+    texto, fuente = _web_search_y_fetch(
+        f'Buscá "{numero}" en servicios.infoleg.gob.ar o infoleg.gob.ar. '
+        f'Necesito la URL exacta de la norma en infoleg.'
+    )
+    if texto and len(texto) > 300:
+        return texto, fuente
+
+    # ── PASO 3: Fallback genérico (comportamiento anterior) ───────────────────
+    prompt_generico = (
+        f'Buscá la norma argentina "{numero}" y traé el texto completo con todos '
+        f'sus artículos y considerandos. Priorizá fuentes como Infoleg, ARCA, BCRA '
+        f'o Boletín Oficial. Incluí número, organismo emisor, fecha y texto íntegro.'
+    )
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=3000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": prompt_generico}]
+        )
+
+        texto_completo = ""
+        url_encontrada = "Fuentes oficiales (web search)"
+
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                texto_completo += block.text + "\n"
+            if hasattr(block, "type") and block.type == "tool_result":
+                if hasattr(block, "content"):
+                    for sub in block.content:
+                        if hasattr(sub, "text"):
+                            texto_completo += sub.text + "\n"
+
+        url = _extraer_url_oficial(texto_completo)
+        if url:
+            url_encontrada = url
+
+        if len(texto_completo.strip()) > 300:
+            return texto_completo.strip(), url_encontrada
+
+    except Exception as e:
+        return "", f"Error: {e}"
+
+    return "", "No encontrada — subí el PDF manualmente."
 
 
 # ── LECTURA DE ARCHIVOS ───────────────────────────────────────────────────────
