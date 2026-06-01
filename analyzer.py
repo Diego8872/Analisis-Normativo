@@ -1,13 +1,13 @@
 """
 analyzer.py — Motor de análisis de normativa argentina
-Groq (llama-3.3-70b) como motor principal — rápido y gratuito
-Claude Haiku como fallback si Groq falla
+Anthropic Sonnet como motor principal
+Groq llama-3.3-70b como fallback si Anthropic falla por saldo
 
-CAMBIOS v3:
-- Motor principal: Groq llama-3.3-70b (~2-5s, gratis)
-- Fallback: Claude Haiku (se usa solo si Groq falla)
-- Web search: siempre Claude Sonnet (Groq no tiene)
-- Límites y lógica de anexos: sin cambios
+LÓGICA DE FALLBACK:
+- _es_error_saldo() detecta errores 402 / credit / balance
+- _llamar_modelo() → Sonnet → si saldo insuficiente → Groq
+- _llamar_modelo_chat() → Groq primero (chat/saludo) → fallback Anthropic
+- Web search: solo Anthropic (Groq no tiene tool nativo)
 """
 import os
 import json
@@ -18,33 +18,13 @@ from groq import Groq
 client_claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 client_groq   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
-MODEL_GROQ   = "llama-3.3-70b-versatile"
-MODEL_CLAUDE = "claude-sonnet-4-6"  # análisis principal
-MODEL_FALLBACK = "claude-haiku-4-5-20251001"  # fallback si falla Sonnet
+MODEL_SONNET   = "claude-sonnet-4-6"
+MODEL_HAIKU    = "claude-haiku-4-5-20251001"
+MODEL_GROQ     = "llama-3.3-70b-versatile"
 
-
-def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
-    """Sonnet primero (calidad), Haiku como fallback."""
-    try:
-        response = client_claude.messages.create(
-            model=MODEL_CLAUDE, max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text.strip()
-    except Exception:
-        response = client_claude.messages.create(
-            model=MODEL_FALLBACK, max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text.strip()
-
-# ── Límites calibrados al contenido real ──────────────────────────────────────
-LIMITE_NORMA   = 9_500   # chars — cubre normas de hasta ~4 páginas completas
-LIMITE_ANEXO   = 7_000   # chars — cubre anexos de hasta ~3 páginas completas
-LIMITE_TOTAL   = 28_000  # chars — techo de seguridad Tier 1 (~7k tokens input)
-# ─────────────────────────────────────────────────────────────────────────────
+LIMITE_NORMA   = 9_500
+LIMITE_ANEXO   = 7_000
+LIMITE_TOTAL   = 28_000
 
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita.
 IMPORTANTE: Tu interlocutor es un despachante de aduana o profesional del comercio exterior. NUNCA recomendés contratar asesores aduanales ni despachantes — ellos ya son los expertos. Dirigí las recomendaciones a la operatoria concreta, no a buscar ayuda profesional externa."""
@@ -64,6 +44,69 @@ Sección CONDICIONAL (solo si la norma crea códigos, regímenes o mecanismos es
 
 Diferenciá norma (texto) de interpretación (inferencia). Sin checklist, sin dudas abiertas, sin recomendar asesores externos."""
 
+
+def _es_error_saldo(e: Exception) -> bool:
+    """Detecta si el error es por saldo insuficiente en Anthropic."""
+    msg = str(e).lower()
+    return "credit" in msg or "balance" in msg or "billing" in msg or "402" in msg
+
+
+def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
+    """
+    Análisis: Sonnet primero → si falla por saldo → Groq → si no → Haiku.
+    """
+    # Intento 1: Anthropic Sonnet
+    try:
+        response = client_claude.messages.create(
+            model=MODEL_SONNET, max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        if not _es_error_saldo(e):
+            # Error distinto al saldo → probar Haiku antes de Groq
+            try:
+                response = client_claude.messages.create(
+                    model=MODEL_HAIKU, max_tokens=max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                return response.content[0].text.strip()
+            except Exception:
+                pass
+
+    # Fallback: Groq
+    response = client_groq.chat.completions.create(
+        model=MODEL_GROQ, max_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _llamar_modelo_chat(system: str, historial: list, max_tokens: int = 1000) -> str:
+    """
+    Chat/saludo: Groq primero (más rápido y gratis) → fallback Anthropic.
+    """
+    msgs = [{"role": m["role"], "content": m["content"]} for m in historial]
+    try:
+        response = client_groq.chat.completions.create(
+            model=MODEL_GROQ, max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system}] + msgs
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        response = client_claude.messages.create(
+            model=MODEL_SONNET, max_tokens=max_tokens,
+            system=system, messages=historial
+        )
+        return response.content[0].text.strip()
+
+
+# ── DETECCIÓN DE ORGANISMO ────────────────────────────────────────────────────
 
 def detectar_organismo_con_ia(numero: str) -> dict:
     prompt = f"""Sos un experto en normativa argentina. El operador ingresó: "{numero}"
@@ -94,8 +137,9 @@ Ejemplos: "Com. A 8330"→BCRA, "RG 5424"→AFIP, "Res SIC 5/2026"→SIC, "Res 5
         }
 
 
+# ── ANEXOS ────────────────────────────────────────────────────────────────────
+
 def _detectar_y_bajar_anexos(texto: str) -> list:
-    """Busca URLs de PDFs de Anexos en el texto y los descarga."""
     import requests as _req
     import pdfplumber
     import io as _io
@@ -113,19 +157,13 @@ def _detectar_y_bajar_anexos(texto: str) -> list:
                     for page in pdf.pages:
                         contenido += (page.extract_text() or "") + "\n"
                 if contenido.strip():
-                    # FIX: usar LIMITE_ANEXO en lugar de hardcodear 600
-                    anexos.append({
-                        "nombre": nombre,
-                        "url": url,
-                        "contenido": contenido.strip()
-                    })
+                    anexos.append({"nombre": nombre, "url": url, "contenido": contenido.strip()})
         except Exception:
             pass
     return anexos
 
 
 def _detectar_anexos_faltantes(texto: str, encontrados: list) -> list:
-    """Detecta Anexos mencionados en la norma que no pudieron obtenerse."""
     menciones = re.findall(r'ANEXO\s+([IVX\d]+)', texto, re.IGNORECASE)
     faltantes = []
     for m in menciones:
@@ -137,18 +175,10 @@ def _detectar_anexos_faltantes(texto: str, encontrados: list) -> list:
 
 
 def _construir_bloque_anexos(anexos_encontrados: list, anexos_usuario: list = None) -> tuple[str, list, list]:
-    """
-    Combina anexos descargados automáticamente + subidos por el usuario.
-    Respeta LIMITE_ANEXO por anexo y LIMITE_TOTAL global.
-    Retorna (bloque_texto, lista_completa, nombres_incluidos).
-    """
-    todos = list(anexos_encontrados)  # copia
-
-    # Agregar los subidos por el usuario (formato: {"nombre": str, "contenido": str})
+    todos = list(anexos_encontrados)
     if anexos_usuario:
         for au in anexos_usuario:
             nombre = au.get("nombre", "ANEXO SUBIDO")
-            # No duplicar si ya se descargó
             if not any(nombre.upper() in a["nombre"].upper() for a in todos):
                 todos.append({"nombre": nombre, "contenido": au.get("contenido", ""), "url": None})
 
@@ -161,14 +191,10 @@ def _construir_bloque_anexos(anexos_encontrados: list, anexos_usuario: list = No
 
     for a in todos:
         contenido = a["contenido"].strip()
-        # Truncar al límite por anexo
         if len(contenido) > LIMITE_ANEXO:
             contenido = contenido[:LIMITE_ANEXO] + "\n[... contenido truncado por longitud ...]"
-
-        # Verificar techo global
         if chars_usados + len(contenido) > LIMITE_TOTAL:
             break
-
         bloques.append(f"--- {a['nombre']} ---\n{contenido}")
         chars_usados += len(contenido)
         incluidos.append(a["nombre"])
@@ -177,35 +203,20 @@ def _construir_bloque_anexos(anexos_encontrados: list, anexos_usuario: list = No
     return bloque_texto, todos, incluidos
 
 
-def analizar_norma(
-    texto_norma: str,
-    organismo: str = "BOLETIN",
-    anexos_usuario: list = None   # ← NUEVO: lista de {"nombre": str, "contenido": str}
-) -> dict:
-    """
-    Analiza una norma con todos sus anexos.
+# ── ANÁLISIS PRINCIPAL ────────────────────────────────────────────────────────
 
-    anexos_usuario: anexos subidos manualmente por el usuario en Tab 3.
-    Cada elemento: {"nombre": "ANEXO I", "contenido": "texto extraído del PDF"}
-    """
-    # 1. Intentar bajar anexos referenciados en el texto
+def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario: list = None) -> dict:
     anexos_descargados = _detectar_y_bajar_anexos(texto_norma)
-
-    # 2. Combinar con los subidos por el usuario
     bloque_anexos, todos_anexos, nombres_incluidos = _construir_bloque_anexos(
         anexos_descargados, anexos_usuario or []
     )
-
-    # 3. Detectar faltantes (menciones en norma que no están en ninguna fuente)
     anexos_faltantes = _detectar_anexos_faltantes(texto_norma, todos_anexos)
 
-    # 4. Truncar norma al límite (respetando techo total)
     chars_disponibles_norma = min(LIMITE_NORMA, LIMITE_TOTAL - len(bloque_anexos))
     texto_norma_truncado = texto_norma[:chars_disponibles_norma]
     if len(texto_norma) > chars_disponibles_norma:
         texto_norma_truncado += "\n[... norma truncada por longitud total ...]"
 
-    # 5. Aviso de cobertura para el modelo
     aviso_cobertura = ""
     if nombres_incluidos:
         aviso_cobertura = f"\nNOTA: Se incluyen los siguientes Anexos completos: {', '.join(nombres_incluidos)}. Analizalos en detalle.\n"
@@ -214,7 +225,6 @@ def analizar_norma(
 
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
 
-    # ── LLAMADA ÚNICA ────────────────────────────────────────────────────────
     prompt = f"""Analizá esta normativa argentina. Sé conciso — máx 5 oraciones por sección.
 {aviso_cobertura}
 {bloque_anexos}
@@ -238,7 +248,6 @@ Al final incluí metadatos entre <meta>...</meta>:
 
     texto_respuesta = _llamar_modelo(system, prompt, max_tokens=2500)
 
-    # Extraer metadatos
     meta = {}
     meta_match = re.search(r"<meta>(.*?)</meta>", texto_respuesta, re.DOTALL)
     if meta_match:
@@ -262,7 +271,6 @@ Al final incluí metadatos entre <meta>...</meta>:
         "obligaciones": [],
         "anexos_encontrados": todos_anexos,
         "anexos_faltantes": anexos_faltantes,
-        # Info de diagnóstico — útil para debug en Streamlit
         "_debug": {
             "chars_norma_enviada": len(texto_norma_truncado),
             "chars_anexos_enviados": len(bloque_anexos),
@@ -270,6 +278,8 @@ Al final incluí metadatos entre <meta>...</meta>:
         }
     }
 
+
+# ── CONFIANZA ANEXO ───────────────────────────────────────────────────────────
 
 def evaluar_confianza_anexo(texto_norma: str, ncms_condiciones: dict) -> dict:
     ncms_condiciones = ncms_condiciones or {}
@@ -287,6 +297,8 @@ def evaluar_confianza_anexo(texto_norma: str, ncms_condiciones: dict) -> dict:
         return {"nivel": "general", "icono": "ℹ️", "mensaje": "**Análisis semántico:** norma sin Anexo NCMs. Cruce por texto."}
 
 
+# ── CHAT Y SALUDO ─────────────────────────────────────────────────────────────
+
 def saludo_inicial() -> str:
     return ("Hola, soy tu asistente de normativa argentina. "
             "Podés decirme el número de norma (*Res 5838/2026*, *Com. A 8330*, *RG 5424*...), "
@@ -302,21 +314,7 @@ Tu rol ahora: guiar al operador para encontrar y analizar la norma.
 - Si describe un problema, orientalo a qué norma corresponde.
 - Si es ambiguo, preguntá organismo o más contexto.
 - Máximo 4 oraciones. Directo y profesional."""
-
-    # Convertir historial al formato Groq/OpenAI
-    msgs = [{"role": m["role"], "content": m["content"]} for m in historial]
-    try:
-        response = client_groq.chat.completions.create(
-            model=MODEL_GROQ, max_tokens=400,
-            messages=[{"role": "system", "content": system}] + msgs
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        response = client_claude.messages.create(
-            model=MODEL_CLAUDE, max_tokens=400,
-            system=system, messages=historial
-        )
-        return response.content[0].text.strip()
+    return _llamar_modelo_chat(system, historial, max_tokens=400)
 
 
 def responder_en_dialogo(texto_norma: str, analisis: dict, historial: list, organismo: str = "BOLETIN") -> str:
@@ -330,20 +328,7 @@ Texto norma:
 {texto_norma[:3000]}
 
 Respondé con criterio experto. Si algo no está en la norma, indicalo claramente."""
-
-    msgs = [{"role": m["role"], "content": m["content"]} for m in historial]
-    try:
-        response = client_groq.chat.completions.create(
-            model=MODEL_GROQ, max_tokens=1000,
-            messages=[{"role": "system", "content": system}] + msgs
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        response = client_claude.messages.create(
-            model=MODEL_CLAUDE, max_tokens=1000,
-            system=system, messages=historial
-        )
-        return response.content[0].text.strip()
+    return _llamar_modelo_chat(system, historial, max_tokens=1000)
 
 
 def generar_pregunta_output(analisis: dict, historial: list) -> str:
@@ -353,12 +338,13 @@ def generar_pregunta_output(analisis: dict, historial: list) -> str:
             "cruzar con tu catálogo, generar un memo, o hacerme cualquier consulta.")
 
 
+# ── CRUCE CON CATÁLOGO ────────────────────────────────────────────────────────
+
 def detectar_columnas(columnas: list, muestra: list) -> dict:
     prompt = f"""Columnas: {columnas}
 Muestra: {json.dumps(muestra[:4], ensure_ascii=False)}
 Identificá artículo/código, NCM y descripción.
 SOLO JSON: {{"col_articulo": "nombre_o_null", "col_ncm": "nombre_o_null", "col_descripcion": "nombre_o_null"}}"""
-
     try:
         text = _llamar_modelo("Respondé SOLO con JSON válido.", prompt, max_tokens=150)
         return json.loads(re.sub(r"```json|```", "", text).strip())
@@ -416,5 +402,5 @@ def generar_resumen_ejecutivo(analisis: dict, resultados: list = None, organismo
         detalle = "\n".join(f"- {r['articulo']} ({r['ncm']}): {r['estado']} — {r['fundamento']}" for r in resultados[:25])
         stats = f"\nCruce: {len(resultados)} artículos | Encuadran: {enc} | No: {no} | A analizar: {aal}\n{detalle}"
 
-    prompt = f"""{SISTEMA_EXPERTO}\nRedactá memo ejecutivo profesional:\nNORMA: {analisis.get('titulo','')}\n{analisis.get('analisis_completo','')[:3000]}\n{stats}\nIncluir: encabezado, marco normativo, análisis técnico, conclusiones y recomendaciones."""
+    prompt = f"""Redactá memo ejecutivo profesional:\nNORMA: {analisis.get('titulo','')}\n{analisis.get('analisis_completo','')[:3000]}\n{stats}\nIncluir: encabezado, marco normativo, análisis técnico, conclusiones y recomendaciones."""
     return _llamar_modelo(SISTEMA_EXPERTO, prompt, max_tokens=1500)
