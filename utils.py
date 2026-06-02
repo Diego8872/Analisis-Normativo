@@ -87,31 +87,18 @@ def _web_search_claude(prompt: str, max_tokens: int = 1000) -> str:
     return texto
 
 
-def _web_search_groq(prompt: str) -> str:
-    """Web search usando Groq (sin tool nativo — pide que infiera la URL)."""
-    response = client_groq.chat.completions.create(
-        model=MODEL_GROQ,
-        max_tokens=500,
-        messages=[
-            {
-                "role": "system",
-                "content": "Sos un asistente especializado en normativa argentina. "
-                           "Cuando te pidan buscar una norma, construí la URL más probable "
-                           "en boletinoficial.gob.ar o infoleg.gob.ar e indicála claramente."
-            },
-            {"role": "user", "content": prompt}
-        ]
-    )
-    return response.choices[0].message.content.strip()
+class SinSaldoError(Exception):
+    """Se lanza cuando Anthropic no tiene saldo suficiente."""
+    pass
 
 
 def _web_search_con_fallback(prompt: str, max_tokens_claude: int = 1000) -> str:
-    """Intenta web search con Anthropic; si falla por saldo, usa Groq."""
+    """Intenta web search con Anthropic. Si no hay saldo, lanza SinSaldoError."""
     try:
         return _web_search_claude(prompt, max_tokens_claude)
     except Exception as e:
         if _es_error_saldo(e):
-            return _web_search_groq(prompt)
+            raise SinSaldoError("Sin saldo en Anthropic API")
         raise
 
 
@@ -145,28 +132,32 @@ def buscar_norma(numero: str) -> tuple[str, str]:
     """
 
     # ── PASO 1: Boletín Oficial ───────────────────────────────────────────────
-    texto, fuente = _web_search_y_fetch(
-        f'Buscá "{numero}" en el sitio boletinoficial.gob.ar. '
-        f'Necesito la URL exacta del aviso en boletinoficial.gob.ar/detalleAviso/...'
-    )
-    if texto and len(texto) > 300:
-        return texto, fuente
+    try:
+        texto, fuente = _web_search_y_fetch(
+            f'Buscá "{numero}" en el sitio boletinoficial.gob.ar. '
+            f'Necesito la URL exacta del aviso en boletinoficial.gob.ar/detalleAviso/...'
+        )
+        if texto and len(texto) > 300:
+            return texto, fuente
 
-    # ── PASO 2: Infoleg ───────────────────────────────────────────────────────
-    texto, fuente = _web_search_y_fetch(
-        f'Buscá "{numero}" en servicios.infoleg.gob.ar o infoleg.gob.ar. '
-        f'Necesito la URL exacta de la norma en infoleg.'
-    )
-    if texto and len(texto) > 300:
-        return texto, fuente
+        # ── PASO 2: Infoleg ───────────────────────────────────────────────────────
+        texto, fuente = _web_search_y_fetch(
+            f'Buscá "{numero}" en servicios.infoleg.gob.ar o infoleg.gob.ar. '
+            f'Necesito la URL exacta de la norma en infoleg.'
+        )
+        if texto and len(texto) > 300:
+            return texto, fuente
 
-    # ── PASO 3: Fallback genérico ─────────────────────────────────────────────
-    texto, fuente = _web_search_y_fetch(
-        f'Buscá la norma argentina "{numero}" y traé el texto completo con todos '
-        f'sus artículos y considerandos. Priorizá Infoleg, ARCA, BCRA o Boletín Oficial.'
-    )
-    if texto and len(texto) > 300:
-        return texto, fuente
+        # ── PASO 3: Fallback genérico ─────────────────────────────────────────────
+        texto, fuente = _web_search_y_fetch(
+            f'Buscá la norma argentina "{numero}" y traé el texto completo con todos '
+            f'sus artículos y considerandos. Priorizá Infoleg, ARCA, BCRA o Boletín Oficial.'
+        )
+        if texto and len(texto) > 300:
+            return texto, fuente
+
+    except SinSaldoError:
+        return "", "Error: Sin saldo en la API de Anthropic — recargá créditos en console.anthropic.com o subí el PDF manualmente."
 
     return "", "No encontrada — subí el PDF manualmente."
 
