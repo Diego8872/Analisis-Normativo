@@ -188,6 +188,54 @@ Ejemplos: "Com. A 8330"→BCRA, "RG 5424"→AFIP, "Res SIC 5/2026"→SIC, "Res 5
 
 # ── ANEXOS ────────────────────────────────────────────────────────────────────
 
+RE_NCM = re.compile(r'(?<![\d.])(\d{4}\.\d{2}\.\d{2})(?!\d)')
+RE_RUIDO = re.compile(r'^(IF-|P[áa]gina\b|Digitally|Date:|ELECTRONICA|GESTION DOCUMENTAL)', re.IGNORECASE)
+
+
+def _digitos8(ncm) -> str:
+    """NCM a solo dígitos, primeros 8 (el catálogo puede venir a 12)."""
+    return re.sub(r"[^0-9]", "", str(ncm))[:8]
+
+
+def _extraer_ncms(texto: str) -> list:
+    """Códigos NCM (0000.00.00) sin duplicados y en orden. Ignora firmas digitales."""
+    vistos, salida = set(), []
+    for linea in texto.splitlines():
+        if linea.strip().lower().startswith(("date:", "digitally signed")):
+            continue
+        for m in RE_NCM.findall(linea):
+            if m not in vistos:
+                vistos.add(m)
+                salida.append(m)
+    return salida
+
+
+def _es_listado_ncm(contenido: str) -> bool:
+    """True si el anexo es básicamente una lista de códigos NCM (sin condiciones/descripciones)."""
+    solo_codigo = otras = 0
+    for linea in contenido.splitlines():
+        l = linea.strip()
+        if not l or RE_RUIDO.match(l):
+            continue
+        if RE_NCM.fullmatch(l):
+            solo_codigo += 1
+        else:
+            otras += 1
+    return solo_codigo >= 30 and solo_codigo >= 0.85 * (solo_codigo + otras)
+
+
+def _nombre_anexo_desde_contenido(contenido: str):
+    """Si el texto empieza con 'ANEXO II' (o similar) devuelve 'ANEXO II'."""
+    m = re.search(r'^\s*ANEXO\s+([IVX\d]+)\b', contenido[:600], re.IGNORECASE | re.MULTILINE)
+    return f"ANEXO {m.group(1).upper()}" if m else None
+
+
+def _mismo_anexo(nombre_a: str, nombre_b: str) -> bool:
+    """Compara nombres de anexo sin confundir 'ANEXO I' con 'ANEXO II'."""
+    a, b = nombre_a.upper().strip(), nombre_b.upper().strip()
+    return bool(re.search(rf'(?<!\w){re.escape(a)}(?!\w)', b))
+
+
 def _detectar_y_bajar_anexos(texto: str) -> list:
     import requests as _req
     import pdfplumber
@@ -217,7 +265,7 @@ def _detectar_anexos_faltantes(texto: str, encontrados: list) -> list:
     faltantes = []
     for m in menciones:
         nombre = f"ANEXO {m.upper()}"
-        if not any(nombre in a["nombre"].upper() for a in encontrados):
+        if not any(_mismo_anexo(nombre, a["nombre"]) for a in encontrados):
             if nombre not in faltantes:
                 faltantes.append(nombre)
     return faltantes
@@ -228,9 +276,11 @@ def _unir_anexos(anexos_encontrados: list, anexos_usuario: list = None) -> list:
     todos = list(anexos_encontrados)
     if anexos_usuario:
         for au in anexos_usuario:
-            nombre = au.get("nombre", "ANEXO SUBIDO")
-            if not any(nombre.upper() in a["nombre"].upper() for a in todos):
-                todos.append({"nombre": nombre, "contenido": au.get("contenido", ""), "url": None})
+            contenido = au.get("contenido", "")
+            # El nombre del archivo puede ser cualquier cosa: si el texto dice "ANEXO II", se usa eso
+            nombre = _nombre_anexo_desde_contenido(contenido) or au.get("nombre", "ANEXO SUBIDO")
+            if not any(_mismo_anexo(nombre, a["nombre"]) for a in todos):
+                todos.append({"nombre": nombre, "contenido": contenido, "url": None})
     return todos
 
 
@@ -245,6 +295,13 @@ def _construir_bloque_anexos(todos: list, limite_anexo: int, limite_total: int) 
 
     for a in todos:
         contenido = a["contenido"].strip()
+        if _es_listado_ncm(contenido):
+            # Listado puro de NCM: se procesa por código, no hace falta mandarlo entero al modelo
+            ncms_a = _extraer_ncms(contenido)
+            titulo = " / ".join(l.strip() for l in contenido.splitlines()[:2] if l.strip())
+            contenido = (f"[Anexo con listado de {len(ncms_a)} códigos NCM. Se procesa automáticamente; no se reproduce.]\n"
+                         f"Encabezado: {titulo}\n"
+                         f"Primeros códigos: {', '.join(ncms_a[:15])} ...")
         if len(contenido) > limite_anexo:
             contenido = contenido[:limite_anexo] + "\n[... contenido truncado por longitud ...]"
         if chars_usados + len(contenido) > limite_total:
@@ -260,7 +317,8 @@ def _construir_bloque_anexos(todos: list, limite_anexo: int, limite_total: int) 
 # ── ANÁLISIS PRINCIPAL ────────────────────────────────────────────────────────
 
 def _armar_prompt_analisis(texto_norma: str, todos_anexos: list, anexos_faltantes: list,
-                           limite_norma: int, limite_anexo: int, limite_total: int) -> tuple[str, dict]:
+                           limite_norma: int, limite_anexo: int, limite_total: int,
+                           n_ncms: int = 0) -> tuple[str, dict]:
     """Arma el prompt de análisis para un perfil de límites. Devuelve (prompt, info_debug)."""
     bloque_anexos, nombres_incluidos = _construir_bloque_anexos(todos_anexos, limite_anexo, limite_total)
 
@@ -272,6 +330,9 @@ def _armar_prompt_analisis(texto_norma: str, todos_anexos: list, anexos_faltante
     aviso_cobertura = ""
     if nombres_incluidos:
         aviso_cobertura = f"\nNOTA: Se incluyen los siguientes Anexos completos: {', '.join(nombres_incluidos)}. Analizalos en detalle.\n"
+    if n_ncms:
+        aviso_cobertura += (f"NOTA: los {n_ncms} NCM del listado ya fueron extraídos por el sistema. "
+                            "Dejá \"ncms_condiciones\" vacío ({}) y poné \"tiene_anexo_ncm\" en true.\n")
     if anexos_faltantes:
         aviso_cobertura += f"AVISO: Los siguientes Anexos no están disponibles: {', '.join(anexos_faltantes)}. Indicalo en el análisis.\n"
 
@@ -309,16 +370,26 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario:
     todos_anexos = _unir_anexos(anexos_descargados, anexos_usuario or [])
     anexos_faltantes = _detectar_anexos_faltantes(texto_norma, todos_anexos)
 
+    # NCM de los anexos que son listados puros: extracción directa, sin pasar por el modelo
+    ncms_listados = []
+    for a in todos_anexos:
+        if _es_listado_ncm(a["contenido"]):
+            for c in _extraer_ncms(a["contenido"]):
+                if c not in ncms_listados:
+                    ncms_listados.append(c)
+
     system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
 
     # Prompt amplio para Sonnet y prompt reducido para el fallback a Groq
     prompt_sonnet, info_sonnet = _armar_prompt_analisis(
         texto_norma, todos_anexos, anexos_faltantes,
-        LIMITE_NORMA_SONNET, LIMITE_ANEXO_SONNET, LIMITE_TOTAL_SONNET
+        LIMITE_NORMA_SONNET, LIMITE_ANEXO_SONNET, LIMITE_TOTAL_SONNET,
+        n_ncms=len(ncms_listados)
     )
     prompt_groq, info_groq = _armar_prompt_analisis(
         texto_norma, todos_anexos, anexos_faltantes,
-        LIMITE_NORMA_GROQ, LIMITE_ANEXO_GROQ, LIMITE_TOTAL_GROQ
+        LIMITE_NORMA_GROQ, LIMITE_ANEXO_GROQ, LIMITE_TOTAL_GROQ,
+        n_ncms=len(ncms_listados)
     )
 
     texto_respuesta = _llamar_modelo(system, prompt_sonnet, max_tokens=2500, prompt_groq=prompt_groq)
@@ -335,6 +406,14 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario:
             meta = {}
         texto_respuesta = texto_respuesta[:meta_match.start()].strip()
 
+    # Si hay listado NCM extraído por código, ese es el que manda (sin condiciones adicionales)
+    if ncms_listados:
+        ncms_final = {c: "" for c in ncms_listados}
+        tiene_ncm = True
+    else:
+        ncms_final = meta.get("ncms_condiciones") or {}
+        tiene_ncm = meta.get("tiene_anexo_ncm", False)
+
     return {
         "analisis_completo": texto_respuesta,
         "titulo": meta.get("titulo", ""),
@@ -343,8 +422,8 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario:
         "vigencia": meta.get("vigencia", ""),
         "impacto_principal": meta.get("impacto_principal", ""),
         "afectados": meta.get("afectados", []),
-        "tiene_anexo_ncm": meta.get("tiene_anexo_ncm", False),
-        "ncms_condiciones": meta.get("ncms_condiciones") or {},
+        "tiene_anexo_ncm": tiene_ncm,
+        "ncms_condiciones": ncms_final,
         "puntos_clave": [],
         "obligaciones": [],
         "anexos_encontrados": todos_anexos,
@@ -354,6 +433,7 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario:
             "chars_norma_enviada": info["chars_norma_enviada"],
             "chars_anexos_enviados": info["chars_anexos_enviados"],
             "anexos_incluidos": info["anexos_incluidos"],
+            "ncms_extraidos": len(ncms_listados),
         }
     }
 
@@ -432,23 +512,42 @@ SOLO JSON: {{"col_articulo": "nombre_o_null", "col_ncm": "nombre_o_null", "col_d
 
 
 def clasificar_articulos(df, cols: dict, ncms_condiciones: dict, texto_norma: str, organismo: str, progress_cb=None) -> list:
+    """
+    Cruza el catálogo contra los NCM de la norma, comparando a 8 dígitos
+    (el catálogo puede traer 12). Sin IA cuando el anexo es solo una lista de NCM.
+    """
     resultados = []
     total = len(df)
-    contexto_ncm = json.dumps(ncms_condiciones, ensure_ascii=False) if ncms_condiciones else ""
+    ncms_condiciones = ncms_condiciones or {}
+    idx_anexo = {_digitos8(k): v for k, v in ncms_condiciones.items()}
+    contexto_ncm = json.dumps(ncms_condiciones, ensure_ascii=False) if (ncms_condiciones and len(ncms_condiciones) <= 60) else ""
 
-    for i, row in df.iterrows():
+    for n, (_, row) in enumerate(df.iterrows(), start=1):
         articulo = str(row.get(cols.get("col_articulo", ""), "")).strip()
         ncm_art  = str(row.get(cols.get("col_ncm", ""), "")).strip()
         desc     = str(row.get(cols.get("col_descripcion", ""), "")).strip()
-        ncm_limpio = re.sub(r"[^0-9]", "", ncm_art)[:8]
-        ncm_en_anexo = any(re.sub(r"[^0-9]", "", k)[:8] == ncm_limpio for k in ncms_condiciones.keys()) if ncms_condiciones else None
+        ncm_limpio = _digitos8(ncm_art)
 
-        if ncms_condiciones and ncm_en_anexo is False:
-            resultados.append({"articulo": articulo, "ncm": ncm_art, "descripcion": desc, "estado": "NO ENCUADRA", "fundamento": "NCM no figura en el Anexo", "color": "🔴"})
-            if progress_cb: progress_cb((i + 1) / total)
-            continue
+        def agregar(estado, fundamento):
+            color = {"ENCUADRA": "🟢", "NO ENCUADRA": "🔴", "A ANALIZAR": "🟡"}.get(estado, "🟡")
+            resultados.append({"articulo": articulo, "ncm": ncm_art, "descripcion": desc,
+                               "estado": estado, "fundamento": fundamento, "color": color})
+            if progress_cb:
+                progress_cb(n / total)
 
-        condicion = next((v for k, v in ncms_condiciones.items() if re.sub(r"[^0-9]", "", k)[:8] == ncm_limpio), None) if ncms_condiciones else "Evaluar por texto"
+        if ncms_condiciones:
+            if len(ncm_limpio) < 8:
+                agregar("A ANALIZAR", "NCM vacío o incompleto en el catálogo")
+                continue
+            if ncm_limpio not in idx_anexo:
+                agregar("NO ENCUADRA", "NCM no figura en el Anexo")
+                continue
+            condicion = idx_anexo[ncm_limpio]
+            if not condicion:
+                agregar("ENCUADRA", "El NCM (8 dígitos) figura en el Anexo, sin condiciones adicionales")
+                continue
+        else:
+            condicion = "Evaluar por texto"
 
         prompt = f"""{SISTEMA_EXPERTO}
 
@@ -465,9 +564,7 @@ Artículo: {articulo} | NCM: {ncm_art} | Desc: {desc} | Condición: {condicion o
             estado = "A ANALIZAR"
             fundamento = "Error — revisar manualmente"
 
-        color = {"ENCUADRA": "🟢", "NO ENCUADRA": "🔴", "A ANALIZAR": "🟡"}.get(estado, "🟡")
-        resultados.append({"articulo": articulo, "ncm": ncm_art, "descripcion": desc, "estado": estado, "fundamento": fundamento, "color": color})
-        if progress_cb: progress_cb((i + 1) / total)
+        agregar(estado, fundamento)
 
     return resultados
 
