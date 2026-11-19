@@ -50,15 +50,18 @@ LIMITE_ANEXO_GROQ   = _env_int("LIMITE_ANEXO_GROQ", 4_000)
 LIMITE_TOTAL_GROQ   = _env_int("LIMITE_TOTAL_GROQ", 12_000)
 GROQ_MAX_TOKENS     = _env_int("GROQ_MAX_TOKENS", 2_000)   # tope de salida en Groq
 
+# Largo del análisis: palabras máximas por sección (subir para un análisis más extenso)
+PALABRAS_SECCION    = _env_int("PALABRAS_SECCION", 140)
+
 # Motor que respondió en la última llamada de análisis ("sonnet" | "haiku" | "groq")
 ULTIMO_MOTOR = ""
 
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita.
 IMPORTANTE: Tu interlocutor es un despachante de aduana o profesional del comercio exterior. NUNCA recomendés contratar asesores aduanales ni despachantes — ellos ya son los expertos. Dirigí las recomendaciones a la operatoria concreta, no a buscar ayuda profesional externa."""
 
-FORMATO_SALIDA = """Análisis profesional para cliente de comercio exterior. Conciso y directo — el operador profundiza en el chat.
+FORMATO_SALIDA = f"""Análisis profesional para cliente de comercio exterior. Conciso y directo — el operador profundiza en el chat.
 
-LÍMITE ESTRICTO: máx 120 palabras por sección. Sin relleno, sin repetir info entre secciones.
+LÍMITE ESTRICTO: máx {PALABRAS_SECCION} palabras por sección. Sin relleno, sin repetir info entre secciones.
 
 Secciones FIJAS (siempre presentes):
 1. RESUMEN EJECUTIVO — qué regula, a quién afecta, qué cambia. Prosa, máx 5 oraciones.
@@ -236,6 +239,25 @@ def _mismo_anexo(nombre_a: str, nombre_b: str) -> bool:
     return bool(re.search(rf'(?<!\w){re.escape(a)}(?!\w)', b))
 
 
+def separar_norma_y_anexos(archivos: list) -> tuple:
+    """
+    archivos: [{"nombre": str, "nombre_limpio": str, "contenido": str}, ...] en cualquier orden.
+    La norma es el primer archivo que NO empieza con "ANEXO ..."; el resto son anexos.
+    Si todos empiezan con "ANEXO", el primero hace de norma.
+    Devuelve (norma, anexos_usuario).
+    """
+    norma = next((a for a in archivos if not _nombre_anexo_desde_contenido(a["contenido"])), None)
+    if norma is None:
+        norma = archivos[0]
+    anexos = []
+    for a in archivos:
+        if a is norma:
+            continue
+        nombre = _nombre_anexo_desde_contenido(a["contenido"]) or a.get("nombre_limpio") or a["nombre"]
+        anexos.append({"nombre": nombre, "contenido": a["contenido"]})
+    return norma, anexos
+
+
 def _detectar_y_bajar_anexos(texto: str) -> list:
     import requests as _req
     import pdfplumber
@@ -336,7 +358,7 @@ def _armar_prompt_analisis(texto_norma: str, todos_anexos: list, anexos_faltante
     if anexos_faltantes:
         aviso_cobertura += f"AVISO: Los siguientes Anexos no están disponibles: {', '.join(anexos_faltantes)}. Indicalo en el análisis.\n"
 
-    prompt = f"""Analizá esta normativa argentina. Sé conciso — máx 5 oraciones por sección.
+    prompt = f"""Analizá esta normativa argentina. Sé conciso, pero no omitas obligaciones, plazos, excepciones ni requisitos relevantes.
 {aviso_cobertura}
 {bloque_anexos}
 
