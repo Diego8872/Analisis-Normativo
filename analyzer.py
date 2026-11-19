@@ -8,6 +8,11 @@ LÓGICA DE FALLBACK:
 - _llamar_modelo() → Sonnet → si saldo insuficiente → Groq
 - _llamar_modelo_chat() → Groq primero (chat/saludo) → fallback Anthropic
 - Web search: solo Anthropic (Groq no tiene tool nativo)
+
+LÍMITES DE CARACTERES (bloque único para ajustar):
+- Perfil SONNET: se usa cuando el análisis corre en Anthropic (límites amplios).
+- Perfil GROQ: se usa si cae a Groq (TPM ajustado en plan gratis).
+- Todos se pueden sobreescribir con variables de entorno, sin tocar el código.
 """
 import os
 import json
@@ -18,13 +23,31 @@ from groq import Groq
 client_claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 client_groq   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
-MODEL_SONNET   = "claude-sonnet-4-6"
-MODEL_HAIKU    = "claude-haiku-4-5-20251001"
-MODEL_GROQ     = "llama-3.3-70b-versatile"
+MODEL_SONNET   = os.environ.get("MODEL_SONNET", "claude-sonnet-4-6")
+MODEL_HAIKU    = os.environ.get("MODEL_HAIKU", "claude-haiku-4-5-20251001")
+MODEL_GROQ     = os.environ.get("MODEL_GROQ", "llama-3.3-70b-versatile")
 
-LIMITE_NORMA   = 9_500
-LIMITE_ANEXO   = 7_000
-LIMITE_TOTAL   = 28_000
+
+# ── LÍMITES DE CARACTERES ─────────────────────────────────────────────────────
+def _env_int(nombre: str, defecto: int) -> int:
+    try:
+        return int(os.environ.get(nombre, defecto))
+    except (TypeError, ValueError):
+        return defecto
+
+
+# Perfil Sonnet (Anthropic) — amplio
+LIMITE_NORMA_SONNET = _env_int("LIMITE_NORMA_SONNET", 30_000)   # texto de la norma
+LIMITE_ANEXO_SONNET = _env_int("LIMITE_ANEXO_SONNET", 25_000)   # por anexo
+LIMITE_TOTAL_SONNET = _env_int("LIMITE_TOTAL_SONNET", 90_000)   # norma + anexos
+
+# Perfil Groq (fallback) — valores anteriores, no subir salvo plan pago
+LIMITE_NORMA_GROQ   = _env_int("LIMITE_NORMA_GROQ", 9_500)
+LIMITE_ANEXO_GROQ   = _env_int("LIMITE_ANEXO_GROQ", 7_000)
+LIMITE_TOTAL_GROQ   = _env_int("LIMITE_TOTAL_GROQ", 28_000)
+
+# Motor que respondió en la última llamada de análisis ("sonnet" | "haiku" | "groq")
+ULTIMO_MOTOR = ""
 
 SISTEMA_EXPERTO = """Sos un experto senior en normativa argentina (derecho administrativo, comercio exterior, aduana, ARCA, AFIP, BCRA). Analizás resoluciones con criterio riguroso y práctico. Detectás ambigüedades, señalás riesgos, diferenciás lo que dice la norma de tu interpretación. No inventás información no explícita.
 IMPORTANTE: Tu interlocutor es un despachante de aduana o profesional del comercio exterior. NUNCA recomendés contratar asesores aduanales ni despachantes — ellos ya son los expertos. Dirigí las recomendaciones a la operatoria concreta, no a buscar ayuda profesional externa."""
@@ -51,10 +74,14 @@ def _es_error_saldo(e: Exception) -> bool:
     return "credit" in msg or "balance" in msg or "billing" in msg or "402" in msg
 
 
-def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
+def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000, prompt_groq: str = None) -> str:
     """
     Análisis: Sonnet primero → si falla por saldo → Groq → si no → Haiku.
+    prompt_groq: versión reducida del prompt para el fallback a Groq
+    (si no se pasa, se usa el mismo prompt).
     """
+    global ULTIMO_MOTOR
+
     # Intento 1: Anthropic Sonnet
     try:
         response = client_claude.messages.create(
@@ -62,6 +89,7 @@ def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
             system=system,
             messages=[{"role": "user", "content": prompt}]
         )
+        ULTIMO_MOTOR = "sonnet"
         return response.content[0].text.strip()
     except Exception as e:
         if not _es_error_saldo(e):
@@ -72,18 +100,20 @@ def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000) -> str:
                     system=system,
                     messages=[{"role": "user", "content": prompt}]
                 )
+                ULTIMO_MOTOR = "haiku"
                 return response.content[0].text.strip()
             except Exception:
                 pass
 
-    # Fallback: Groq
+    # Fallback: Groq (con el prompt reducido si existe)
     response = client_groq.chat.completions.create(
         model=MODEL_GROQ, max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt_groq or prompt}
         ]
     )
+    ULTIMO_MOTOR = "groq"
     return response.choices[0].message.content.strip()
 
 
@@ -174,16 +204,21 @@ def _detectar_anexos_faltantes(texto: str, encontrados: list) -> list:
     return faltantes
 
 
-def _construir_bloque_anexos(anexos_encontrados: list, anexos_usuario: list = None) -> tuple[str, list, list]:
+def _unir_anexos(anexos_encontrados: list, anexos_usuario: list = None) -> list:
+    """Une anexos descargados + subidos por el usuario (sin duplicar por nombre)."""
     todos = list(anexos_encontrados)
     if anexos_usuario:
         for au in anexos_usuario:
             nombre = au.get("nombre", "ANEXO SUBIDO")
             if not any(nombre.upper() in a["nombre"].upper() for a in todos):
                 todos.append({"nombre": nombre, "contenido": au.get("contenido", ""), "url": None})
+    return todos
 
+
+def _construir_bloque_anexos(todos: list, limite_anexo: int, limite_total: int) -> tuple[str, list]:
+    """Arma el bloque de texto de anexos respetando los límites. Devuelve (bloque, nombres_incluidos)."""
     if not todos:
-        return "", [], []
+        return "", []
 
     bloques = []
     chars_usados = 0
@@ -191,28 +226,26 @@ def _construir_bloque_anexos(anexos_encontrados: list, anexos_usuario: list = No
 
     for a in todos:
         contenido = a["contenido"].strip()
-        if len(contenido) > LIMITE_ANEXO:
-            contenido = contenido[:LIMITE_ANEXO] + "\n[... contenido truncado por longitud ...]"
-        if chars_usados + len(contenido) > LIMITE_TOTAL:
+        if len(contenido) > limite_anexo:
+            contenido = contenido[:limite_anexo] + "\n[... contenido truncado por longitud ...]"
+        if chars_usados + len(contenido) > limite_total:
             break
         bloques.append(f"--- {a['nombre']} ---\n{contenido}")
         chars_usados += len(contenido)
         incluidos.append(a["nombre"])
 
     bloque_texto = "\n\nANEXOS DISPONIBLES:\n" + "\n\n".join(bloques) if bloques else ""
-    return bloque_texto, todos, incluidos
+    return bloque_texto, incluidos
 
 
 # ── ANÁLISIS PRINCIPAL ────────────────────────────────────────────────────────
 
-def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario: list = None) -> dict:
-    anexos_descargados = _detectar_y_bajar_anexos(texto_norma)
-    bloque_anexos, todos_anexos, nombres_incluidos = _construir_bloque_anexos(
-        anexos_descargados, anexos_usuario or []
-    )
-    anexos_faltantes = _detectar_anexos_faltantes(texto_norma, todos_anexos)
+def _armar_prompt_analisis(texto_norma: str, todos_anexos: list, anexos_faltantes: list,
+                           limite_norma: int, limite_anexo: int, limite_total: int) -> tuple[str, dict]:
+    """Arma el prompt de análisis para un perfil de límites. Devuelve (prompt, info_debug)."""
+    bloque_anexos, nombres_incluidos = _construir_bloque_anexos(todos_anexos, limite_anexo, limite_total)
 
-    chars_disponibles_norma = min(LIMITE_NORMA, LIMITE_TOTAL - len(bloque_anexos))
+    chars_disponibles_norma = max(0, min(limite_norma, limite_total - len(bloque_anexos)))
     texto_norma_truncado = texto_norma[:chars_disponibles_norma]
     if len(texto_norma) > chars_disponibles_norma:
         texto_norma_truncado += "\n[... norma truncada por longitud total ...]"
@@ -222,8 +255,6 @@ def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario:
         aviso_cobertura = f"\nNOTA: Se incluyen los siguientes Anexos completos: {', '.join(nombres_incluidos)}. Analizalos en detalle.\n"
     if anexos_faltantes:
         aviso_cobertura += f"AVISO: Los siguientes Anexos no están disponibles: {', '.join(anexos_faltantes)}. Indicalo en el análisis.\n"
-
-    system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
 
     prompt = f"""Analizá esta normativa argentina. Sé conciso — máx 5 oraciones por sección.
 {aviso_cobertura}
@@ -246,7 +277,35 @@ Al final incluí metadatos entre <meta>...</meta>:
 }}
 </meta>"""
 
-    texto_respuesta = _llamar_modelo(system, prompt, max_tokens=2500)
+    info = {
+        "chars_norma_enviada": len(texto_norma_truncado),
+        "chars_anexos_enviados": len(bloque_anexos),
+        "anexos_incluidos": nombres_incluidos,
+    }
+    return prompt, info
+
+
+def analizar_norma(texto_norma: str, organismo: str = "BOLETIN", anexos_usuario: list = None) -> dict:
+    anexos_descargados = _detectar_y_bajar_anexos(texto_norma)
+    todos_anexos = _unir_anexos(anexos_descargados, anexos_usuario or [])
+    anexos_faltantes = _detectar_anexos_faltantes(texto_norma, todos_anexos)
+
+    system = SISTEMA_EXPERTO + "\n\n" + FORMATO_SALIDA
+
+    # Prompt amplio para Sonnet y prompt reducido para el fallback a Groq
+    prompt_sonnet, info_sonnet = _armar_prompt_analisis(
+        texto_norma, todos_anexos, anexos_faltantes,
+        LIMITE_NORMA_SONNET, LIMITE_ANEXO_SONNET, LIMITE_TOTAL_SONNET
+    )
+    prompt_groq, info_groq = _armar_prompt_analisis(
+        texto_norma, todos_anexos, anexos_faltantes,
+        LIMITE_NORMA_GROQ, LIMITE_ANEXO_GROQ, LIMITE_TOTAL_GROQ
+    )
+
+    texto_respuesta = _llamar_modelo(system, prompt_sonnet, max_tokens=2500, prompt_groq=prompt_groq)
+
+    # Info de debug según el motor que realmente respondió
+    info = info_groq if ULTIMO_MOTOR == "groq" else info_sonnet
 
     meta = {}
     meta_match = re.search(r"<meta>(.*?)</meta>", texto_respuesta, re.DOTALL)
@@ -272,9 +331,10 @@ Al final incluí metadatos entre <meta>...</meta>:
         "anexos_encontrados": todos_anexos,
         "anexos_faltantes": anexos_faltantes,
         "_debug": {
-            "chars_norma_enviada": len(texto_norma_truncado),
-            "chars_anexos_enviados": len(bloque_anexos),
-            "anexos_incluidos": nombres_incluidos,
+            "motor": ULTIMO_MOTOR,
+            "chars_norma_enviada": info["chars_norma_enviada"],
+            "chars_anexos_enviados": info["chars_anexos_enviados"],
+            "anexos_incluidos": info["anexos_incluidos"],
         }
     }
 
