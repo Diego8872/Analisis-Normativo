@@ -1,7 +1,7 @@
 """
 analyzer.py — Motor de análisis de normativa argentina
 Anthropic Sonnet como motor principal
-Groq llama-3.3-70b como fallback si Anthropic falla por saldo
+Groq (openai/gpt-oss-120b) como fallback si Anthropic falla por saldo
 
 LÓGICA DE FALLBACK:
 - _es_error_saldo() detecta errores 402 / credit / balance
@@ -25,7 +25,7 @@ client_groq   = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
 MODEL_SONNET   = os.environ.get("MODEL_SONNET", "claude-sonnet-4-6")
 MODEL_HAIKU    = os.environ.get("MODEL_HAIKU", "claude-haiku-4-5-20251001")
-MODEL_GROQ     = os.environ.get("MODEL_GROQ", "llama-3.3-70b-versatile")
+MODEL_GROQ     = os.environ.get("MODEL_GROQ", "openai/gpt-oss-120b")
 
 
 # ── LÍMITES DE CARACTERES ─────────────────────────────────────────────────────
@@ -41,10 +41,14 @@ LIMITE_NORMA_SONNET = _env_int("LIMITE_NORMA_SONNET", 30_000)   # texto de la no
 LIMITE_ANEXO_SONNET = _env_int("LIMITE_ANEXO_SONNET", 25_000)   # por anexo
 LIMITE_TOTAL_SONNET = _env_int("LIMITE_TOTAL_SONNET", 90_000)   # norma + anexos
 
-# Perfil Groq (fallback) — valores anteriores, no subir salvo plan pago
-LIMITE_NORMA_GROQ   = _env_int("LIMITE_NORMA_GROQ", 9_500)
-LIMITE_ANEXO_GROQ   = _env_int("LIMITE_ANEXO_GROQ", 7_000)
-LIMITE_TOTAL_GROQ   = _env_int("LIMITE_TOTAL_GROQ", 28_000)
+# Perfil Groq (fallback) — el plan gratis permite ~8.000 tokens/min entre
+# entrada y salida (error 413 si se pasa). Con ~3 chars/token: 12.000 chars
+# ≈ 4.000 tokens + ~700 de instrucciones + 2.000 de salida = ~6.700.
+# No subir salvo plan pago de Groq.
+LIMITE_NORMA_GROQ   = _env_int("LIMITE_NORMA_GROQ", 8_000)
+LIMITE_ANEXO_GROQ   = _env_int("LIMITE_ANEXO_GROQ", 4_000)
+LIMITE_TOTAL_GROQ   = _env_int("LIMITE_TOTAL_GROQ", 12_000)
+GROQ_MAX_TOKENS     = _env_int("GROQ_MAX_TOKENS", 2_000)   # tope de salida en Groq
 
 # Motor que respondió en la última llamada de análisis ("sonnet" | "haiku" | "groq")
 ULTIMO_MOTOR = ""
@@ -66,6 +70,19 @@ Sección CONDICIONAL (solo si la norma crea códigos, regímenes o mecanismos es
 - SUBREGÍMENES / MECANISMOS — tabla: código | descripción | tributos. Insertá entre sección 2 y 3.
 
 Diferenciá norma (texto) de interpretación (inferencia). Sin checklist, sin dudas abiertas, sin recomendar asesores externos."""
+
+
+def _groq_chat(messages: list, max_tokens: int) -> str:
+    """Llamada a Groq. Con modelos gpt-oss baja el esfuerzo de razonamiento
+    para que los tokens se usen en la respuesta y no en pensar."""
+    kwargs = {}
+    if "gpt-oss" in MODEL_GROQ:
+        kwargs["extra_body"] = {"reasoning_effort": "low"}
+    response = client_groq.chat.completions.create(
+        model=MODEL_GROQ, max_tokens=max_tokens,
+        messages=messages, **kwargs
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 def _es_error_saldo(e: Exception) -> bool:
@@ -106,15 +123,15 @@ def _llamar_modelo(system: str, prompt: str, max_tokens: int = 4000, prompt_groq
                 pass
 
     # Fallback: Groq (con el prompt reducido si existe)
-    response = client_groq.chat.completions.create(
-        model=MODEL_GROQ, max_tokens=max_tokens,
-        messages=[
+    texto = _groq_chat(
+        [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt_groq or prompt}
-        ]
+        ],
+        max_tokens=min(max_tokens, GROQ_MAX_TOKENS)
     )
     ULTIMO_MOTOR = "groq"
-    return response.choices[0].message.content.strip()
+    return texto
 
 
 def _llamar_modelo_chat(system: str, historial: list, max_tokens: int = 1000) -> str:
@@ -123,11 +140,13 @@ def _llamar_modelo_chat(system: str, historial: list, max_tokens: int = 1000) ->
     """
     msgs = [{"role": m["role"], "content": m["content"]} for m in historial]
     try:
-        response = client_groq.chat.completions.create(
-            model=MODEL_GROQ, max_tokens=max_tokens,
-            messages=[{"role": "system", "content": system}] + msgs
+        texto = _groq_chat(
+            [{"role": "system", "content": system}] + msgs,
+            max_tokens=min(max_tokens, GROQ_MAX_TOKENS)
         )
-        return response.choices[0].message.content.strip()
+        if texto:
+            return texto
+        raise ValueError("Respuesta vacía de Groq")
     except Exception:
         response = client_claude.messages.create(
             model=MODEL_SONNET, max_tokens=max_tokens,
