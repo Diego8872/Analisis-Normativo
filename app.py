@@ -13,7 +13,7 @@ from analyzer import (
     analizar_norma, detectar_organismo_con_ia, saludo_inicial,
     chat_inicial_respuesta, generar_pregunta_output, responder_en_dialogo,
     detectar_columnas, clasificar_articulos, generar_resumen_ejecutivo,
-    evaluar_confianza_anexo
+    evaluar_confianza_anexo, separar_norma_y_anexos
 )
 
 st.set_page_config(
@@ -165,25 +165,24 @@ if not st.session_state["texto_norma"]:
             st.info(f"📄 {len(archivos)} archivo(s) cargado(s): {', '.join(f.name for f in archivos)}")
             if st.button("⚖️ Analizar archivo(s)", use_container_width=True, type="primary"):
                 with st.spinner("Leyendo archivo(s)..."):
-                    # El primero es la norma principal; el resto son anexos
-                    norma = archivos[0]
-                    texto = leer_archivo(norma.read(), norma.name)
-                    detector = detectar_organismo_con_ia(norma.name)
-                    organismo = detector.get("organismo", "BOLETIN")
-                    # Anexos adicionales subidos junto con la norma
-                    anexos_usuario = []
-                    for f in archivos[1:]:
+                    leidos = []
+                    for f in archivos:
                         contenido = leer_archivo(f.read(), f.name)
                         nombre_limpio = (
                             f.name.upper()
                             .replace(".PDF","").replace(".DOCX","").replace(".TXT","")
                             .replace("_"," ").replace("-"," ").strip()
                         )
-                        anexos_usuario.append({"nombre": nombre_limpio, "contenido": contenido})
+                        leidos.append({"nombre": f.name, "nombre_limpio": nombre_limpio, "contenido": contenido})
+                    # La norma es el archivo que no empieza con "ANEXO ..." (sin importar el orden de carga)
+                    norma, anexos_usuario = separar_norma_y_anexos(leidos)
+                    texto = norma["contenido"]
+                    detector = detectar_organismo_con_ia(norma["nombre"])
+                    organismo = detector.get("organismo", "BOLETIN")
                 if texto and len(texto) > 100:
                     st.session_state.update({
                         "texto_norma": texto, "organismo": organismo,
-                        "fuente": f"Archivo: {norma.name}", "norma_nombre": norma.name,
+                        "fuente": f"Archivo: {norma['nombre']}", "norma_nombre": norma["nombre"],
                         "_anexos_iniciales": anexos_usuario,  # se usan en Fase 2
                     })
                     st.rerun()
